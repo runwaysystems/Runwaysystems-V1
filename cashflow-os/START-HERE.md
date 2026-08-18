@@ -41,7 +41,7 @@ version:
 
 - **Cloudflare** (Workers + Pages enabled)
 - **Supabase** project with Google OAuth (buyer sign-in)
-- **Resend** sending domain (delivery emails)
+- **Brevo** sending domain (delivery emails)
 - **Lemon Squeezy** account with a store
 
 ### 2. Deploy the Worker (platform API)
@@ -59,7 +59,7 @@ version:
    npx wrangler secret put LEMONSQUEEZY_API_KEY --config worker/wrangler.toml
    npx wrangler secret put LEMONSQUEEZY_WEBHOOK_SECRET --config worker/wrangler.toml
    npx wrangler secret put SUPABASE_ANON_KEY --config worker/wrangler.toml
-   npx wrangler secret put RESEND_API_KEY --config worker/wrangler.toml
+   npx wrangler secret put BREVO_API_KEY --config worker/wrangler.toml
    npx wrangler secret put GOOGLE_SHEETS_COPY_URL --config worker/wrangler.toml
    npx wrangler secret put RATE_LIMIT_SALT --config worker/wrangler.toml
    npx wrangler secret put FEEDBACK_SIGNING_SECRET --config worker/wrangler.toml

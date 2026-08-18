@@ -16,7 +16,7 @@ result of the last full audit. Every change must keep this file true.
    client-side data reads are ever added, **Row Level Security must be
    enabled on every Supabase table first**.
 3. **Never client-side:** Supabase service_role key, the Lemon Squeezy API
-   key and webhook secret, Resend API key, Google Sheets delivery URLs,
+   key and webhook secret, Brevo API key, Google Sheets delivery URLs,
    `RATE_LIMIT_SALT`, `FEEDBACK_SIGNING_SECRET`, Workers AI tokens, and any
    database connection string. These exist only as Worker env/secrets.
 4. **No payment provider SDK in the frontend.** Checkout is server-created
@@ -39,7 +39,7 @@ Where personal data enters, travels, and ends up.
 | Data | Collected at | Sent to | Stored |
 |---|---|---|---|
 | Name, email, avatar (Google profile) | Google OAuth sign-in (user consents) | Supabase auth token validation (Worker `authenticate`) | Supabase auth records only; session JWT in browser localStorage (Supabase default; no PII in our own localStorage keys) |
-| Name, email (checkout) | Lemon Squeezy checkout creation and order webhook | Lemon Squeezy (receipts, account linkage) | D1 `purchases.customer_name` / `customer_email`; Resend delivery emails |
+| Name, email (checkout) | Lemon Squeezy checkout creation and order webhook | Lemon Squeezy (receipts, account linkage) | D1 `purchases.customer_name` / `customer_email`; Brevo delivery emails |
 | Card number, CVC, expiry | Never touches our servers; entered on the Lemon Squeezy hosted page only | Lemon Squeezy | Lemon Squeezy only |
 | Password | Never collected anywhere (Google handles authentication) | - | - |
 | Phone, address, date of birth | Never collected | - | - |
@@ -54,7 +54,7 @@ Where personal data enters, travels, and ends up.
 library. It detaches purchases (`user_id = 'deleted:' || id`), clears email
 and name, deletes review-request rows, withdraws testimonials, clears
 feedback text, and removes rate-limit rows. Aggregate metrics are preserved
-as anonymous totals. Provider-side records (Lemon Squeezy payments, Resend
+as anonymous totals. Provider-side records (Lemon Squeezy payments, Brevo
 sends, Supabase auth) require a support request, as noted in the privacy
 policy.
 
@@ -157,7 +157,7 @@ vulnerabilities). Regression suite now 80 checks including the new guards.
 | Supabase anon key client-side | Yes, by design — auth only, no client DB queries; RLS required before any future client reads |
 | OAuth client secret | Never appears (Google OAuth via Supabase) |
 | JWT/feedback signing secret | Worker secret `FEEDBACK_SIGNING_SECRET` only |
-| Third-party keys (Resend, Workers AI) | Worker env/secrets only |
+| Third-party keys (Brevo, Workers AI) | Worker env/secrets only |
 | `VITE_`/`REACT_APP_`/`NEXT_PUBLIC_` exposure | Only public-safe values; `VITE_OWNER_EMAIL` is optional and documented as bundle-visible |
 | JSON body size | Capped at 8 MB in `readJson` with a 413 before parsing |
 | Public read caching | config/sitemap/testimonials cached server-side, invalidated on every admin write |

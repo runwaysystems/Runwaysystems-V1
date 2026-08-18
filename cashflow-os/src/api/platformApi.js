@@ -94,7 +94,7 @@ const mockAnalytics = {
 const defaultIntegrations = [
   { id: 'lemonsqueezy', label: 'Lemon Squeezy', status: 'setup', detail: 'Merchant of record: Lemon Squeezy handles global sales tax and remittance for your orders' },
   { id: 'supabase', label: 'Supabase', status: import.meta.env.VITE_SUPABASE_URL ? 'connected' : 'setup', detail: 'Google OAuth and account verification' },
-  { id: 'email', label: 'Resend', status: 'setup', detail: 'Delivery and neutral review invitations' },
+  { id: 'email', label: 'Brevo', status: 'setup', detail: 'Delivery and neutral review invitations' },
   { id: 'trustpilot', label: 'Trustpilot', status: import.meta.env.VITE_TRUSTPILOT_BUSINESS_UNIT_ID ? 'connected' : 'setup', detail: 'Neutral invitation for every verified buyer' },
   { id: 'ai', label: 'AI image scanning', status: 'setup', detail: 'Auto-writes feature headings and subheadings when configured on the Worker' },
 ]
