@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getPublicConfig, subscribeToPlatformData } from '../api/platformApi'
 import { setPublicConfigCache } from '../lib/publicConfigCache'
+import { CONFIG_READY, CONFIG_UNAVAILABLE } from '../lib/catalogAvailability'
 
 // Loads the public platform config (products, Trustpilot URL, review policy).
 // Returns null while loading. Preview mode resolves through the localStorage
 // adapter with the same shape as the Worker response.
+//
+// Every resolved config carries a configStatus so consumers can distinguish a
+// successful load that legitimately contains no product (owner hid it) from a
+// failed load (Worker unreachable). Without that flag an empty product list is
+// ambiguous, and the storefront used to resolve the ambiguity by falling back
+// to the built-in catalog, which put hidden products back on the site.
 export function usePublicProducts() {
   const [config, setConfig] = useState(null)
 
@@ -12,11 +19,16 @@ export function usePublicProducts() {
     getPublicConfig()
       .then((next) => {
         if (signal?.aborted) return
-        setPublicConfigCache(next || { products: [] })
-        setConfig(next || { products: [] })
+        const resolved = { products: [], ...(next || {}), configStatus: CONFIG_READY }
+        setPublicConfigCache(resolved)
+        setConfig(resolved)
       })
       .catch(() => {
-        if (!signal?.aborted) setConfig((current) => current || { products: [] })
+        // Keep the last good config if we ever had one: a transient refetch
+        // failure must not retire products that are genuinely on sale.
+        if (!signal?.aborted) {
+          setConfig((current) => current || { products: [], configStatus: CONFIG_UNAVAILABLE })
+        }
       })
   }, [])
 

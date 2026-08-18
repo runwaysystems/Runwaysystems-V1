@@ -4,6 +4,7 @@ import { gsap } from 'gsap'
 import { ArrowRight, ArrowUpRight, Check, ChevronDown, Fingerprint, Layers, LockKeyhole, Plus, ShieldCheck, ShoppingBag, Sparkles } from 'lucide-react'
 import { buildProductViewModel, buildSuiteViewModel, CATALOG_ORDER, defaultProducts, SUITE_NAME } from '../data/catalog'
 import { dedupeProducts } from '../api/platformApi'
+import { catalogIsAuthoritative, storefrontProducts } from '../lib/catalogAvailability'
 import { usePublicProducts } from '../hooks/usePublicProducts'
 import { usePageAnimations } from '../hooks/usePageAnimations'
 import { siteCopy } from '../lib/siteCopy'
@@ -223,7 +224,17 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
   const liveProducts = useMemo(() => dedupeProducts(config?.products || []), [config])
   const suiteVm = useMemo(() => buildSuiteViewModel(config?.suiteContent || {}), [config])
   const supportEmail = config?.supportEmail || SUPPORT_EMAIL
+  // Once the config has loaded, its product list is the whole catalog: a
+  // built-in product the owner has hidden is absent from it on purpose. The
+  // grid previously topped every missing CATALOG_ORDER key back up from the
+  // static catalog, which put hidden products straight back on the homepage.
+  // The static catalog is now only a fallback for when the config could not
+  // be fetched at all.
+  const catalogAuthoritative = catalogIsAuthoritative(config)
   const viewModels = useMemo(() => {
+    if (catalogAuthoritative) {
+      return dedupeProducts(liveProducts.map((product) => buildProductViewModel(product.key, product)))
+    }
     const liveKeys = new Set(liveProducts.map((product) => product.key))
     const ordered = liveProducts.length ? liveProducts : defaultProducts()
     const models = ordered.map((product) => buildProductViewModel(product.key, product))
@@ -235,9 +246,9 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
     // Built view models can still collide by display name (two different keys
     // both named "Cash Flow OS"), which would render two identical cards.
     return dedupeProducts(models)
-  }, [liveProducts])
+  }, [catalogAuthoritative, liveProducts])
 
-  const footerProducts = dedupeProducts(liveProducts.length ? liveProducts : defaultProducts()).map((product) => ({ key: product.key, name: product.name }))
+  const footerProducts = dedupeProducts(storefrontProducts(config, defaultProducts())).map((product) => ({ key: product.key, name: product.name }))
 
   // Rebuilt whenever the catalog changes, so the hero visual always shows the
   // products that are actually on sale.
@@ -327,20 +338,25 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
               <div><p className="eyebrow">The suite</p><h2>{countWord(viewModels.length)} calm {viewModels.length === 1 ? 'system' : 'systems'}.<br />One place to run things.</h2></div>
               <p>Every product is a complete Google Sheets workspace. Buy one or build the set. Each arrives with a private copy and lifetime updates.</p>
             </div>
-            <div className="suite-bundle-banner reveal">
-              <div className="suite-bundle-banner__copy">
-                <p className="eyebrow">{suiteVm.bundle.eyebrow}</p>
-                <b>{suiteVm.bundle.title}</b>
-                <span>{suiteVm.bundle.body}</span>
+            {/* Hiding every product is a valid state (a store between launches),
+                so the suite banner and its $0.00 total are suppressed rather
+                than advertising an empty bundle. */}
+            {viewModels.length > 1 && (
+              <div className="suite-bundle-banner reveal">
+                <div className="suite-bundle-banner__copy">
+                  <p className="eyebrow">{suiteVm.bundle.eyebrow}</p>
+                  <b>{suiteVm.bundle.title}</b>
+                  <span>{suiteVm.bundle.body}</span>
+                </div>
+                <div className="suite-bundle-banner__price">
+                  <strong>{money(bundleTotal)}</strong>
+                  <span>one-time</span>
+                </div>
+                <button className="button button--lime button--large" type="button" onClick={addCompleteSuite}>
+                  Add complete suite <ShoppingBag size={16} />
+                </button>
               </div>
-              <div className="suite-bundle-banner__price">
-                <strong>{money(bundleTotal)}</strong>
-                <span>one-time</span>
-              </div>
-              <button className="button button--lime button--large" type="button" onClick={addCompleteSuite}>
-                Add complete suite <ShoppingBag size={16} />
-              </button>
-            </div>
+            )}
             {bundles.length > 0 && (
               <div className="bundle-grid">
                 {bundles.map((bundle) => (
@@ -369,16 +385,22 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
                 ))}
               </div>
             )}
-            <div className="products-grid">
-              {viewModels.map((product) => (
-                <ProductCard
-                  viewModel={product}
-                  key={product.key}
-                  inCart={cartHas(product.key)}
-                  onToggleCart={toggleCart}
-                />
-              ))}
-            </div>
+            {viewModels.length > 0 ? (
+              <div className="products-grid">
+                {viewModels.map((product) => (
+                  <ProductCard
+                    viewModel={product}
+                    key={product.key}
+                    inCart={cartHas(product.key)}
+                    onToggleCart={toggleCart}
+                  />
+                ))}
+              </div>
+            ) : (
+              <p className="catalog-empty reveal">
+                No products are on sale right now. Check back soon.
+              </p>
+            )}
           </div>
         </section>
 

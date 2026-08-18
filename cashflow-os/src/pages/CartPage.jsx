@@ -11,6 +11,7 @@ import Seo from '../components/Seo'
 import CheckoutConsent from '../components/CheckoutConsent'
 import { sectionIcon } from '../components/ProductSections'
 import { siteCopy } from '../lib/siteCopy'
+import { productIsUnavailable, storefrontProducts } from '../lib/catalogAvailability'
 
 const priceNumber = (value) => {
   const parsed = Number.parseFloat(String(value || '').replace(/[^0-9.]/g, ''))
@@ -53,11 +54,28 @@ export default function CartPage({ theme, onToggleTheme, palette, onPaletteChang
   // Deliberately not persisted: consent is re-taken on every visit to the cart
   // rather than remembered from a previous session.
   const [consented, setConsented] = useState(false)
-  const liveProducts = config?.products?.length ? config.products : defaultProducts()
+  const liveProducts = storefrontProducts(config, defaultProducts())
+
+  // A product hidden (or deleted) after it was added to the cart must drop out
+  // of the cart too, otherwise the shopper sees a line item priced from the
+  // static catalog and checkout is refused by the Worker with a confusing
+  // "not available" error at the very last step.
+  const unavailableKeys = useMemo(
+    () => keys.filter((key) => productIsUnavailable(config, key)),
+    [config, keys],
+  )
 
   const items = useMemo(() => keys
+    .filter((key) => !unavailableKeys.includes(key))
     .map((key) => buildProductViewModel(key, liveProducts.find((product) => product.key === key) || null))
-    .filter(Boolean), [keys, liveProducts])
+    .filter(Boolean), [keys, liveProducts, unavailableKeys])
+
+  // Prune retired keys from the stored cart so the badge count and the
+  // checkout payload agree with what is actually shown.
+  useEffect(() => {
+    if (!unavailableKeys.length) return
+    for (const key of unavailableKeys) remove(key)
+  }, [remove, unavailableKeys])
 
   const fullTotal = items.reduce((sum, item) => sum + priceNumber(item.offer?.displaySalePrice), 0)
 

@@ -113,7 +113,11 @@ function emptyState() {
   }
 }
 
-function mockProducts(state) {
+// Every product the owner has, hidden ones included. This mirrors the
+// Worker's `SELECT * FROM products` behind /admin/products, which applies no
+// visibility filter: the dashboard must keep listing a hidden product so the
+// owner can find it and switch it back on.
+function mockAllProducts(state) {
   const defaults = defaultProducts()
   const overrides = new Map((state.products || []).map((product) => [product.key, product]))
   const merged = defaults.map((product) => {
@@ -131,13 +135,18 @@ function mockProducts(state) {
     return product
   })
   // Owner-created products that are not part of the built-in catalog still
-  // belong in the public product list.
+  // belong in the list.
   for (const saved of state.products || []) {
     if (!defaults.some((product) => product.key === saved.key)) merged.push({ ...saved })
   }
-  // The Worker serves `WHERE active = 1`; the preview adapter has to apply the
-  // same rule or a product hidden in the dashboard keeps showing locally.
-  return dedupeProducts(merged.filter((product) => product.active !== false))
+  return dedupeProducts(merged)
+}
+
+// The public, storefront-facing list. The Worker serves `WHERE active = 1`;
+// the preview adapter has to apply the same rule or a product hidden in the
+// dashboard keeps showing locally.
+function mockProducts(state) {
+  return mockAllProducts(state).filter((product) => product.active !== false)
 }
 
 // Two products that render as the same card (same key, or the same display
@@ -382,7 +391,9 @@ export async function getIntegrationStatus({ token } = {}) {
 export async function getAdminProducts({ token } = {}) {
   if (API_BASE_URL) return request('/admin/products', { token })
   await wait()
-  return mockProducts(readMockState())
+  // The owner dashboard lists hidden products too: unticking "Visible on
+  // storefront" must not make a product disappear from its own editor.
+  return mockAllProducts(readMockState())
 }
 
 export async function createAdminProduct(input, { token } = {}) {

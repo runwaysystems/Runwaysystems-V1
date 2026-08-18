@@ -4,6 +4,7 @@ import { catalogEntry, buildProductViewModel, defaultProducts } from '../data/ca
 import { API_BASE_URL } from '../api/platformApi'
 import { usePublicProducts } from '../hooks/usePublicProducts'
 import { isPreviewRequest, usePreviewDraft } from '../hooks/usePreviewDraft'
+import { productIsUnavailable, storefrontProducts } from '../lib/catalogAvailability'
 import { useSecureCheckout } from '../hooks/useSecureCheckout'
 import { usePageAnimations } from '../hooks/usePageAnimations'
 import { useCart } from '../context/CartContext'
@@ -122,29 +123,17 @@ export default function ProductPage({ theme, onToggleTheme, palette, onPaletteCh
     ]
   }, [product, productKey, seoDescription])
 
-  if (!inCatalog && !live) {
-    return (
-      <div className="product-not-found">
-        <div className="shell">
-          <p className="eyebrow">PRODUCT NOT FOUND</p>
-          <h1>This product is not in the suite.</h1>
-          <p>The link may be out of date, or the product may no longer be available.</p>
-          <Link className="button primary" to="/"><ArrowLeft size={15} /> Back to the suite</Link>
-        </div>
-      </div>
-    )
-  }
+  // Hiding a product must hide its page too. Once the public config has
+  // actually loaded, a key that is absent from it is either hidden or deleted,
+  // so the page 404s instead of falling back to the built-in catalog copy,
+  // which would keep a retired product fully readable (and indexable) at its
+  // direct URL. If the config could not be loaded at all, nothing is treated
+  // as hidden, so an outage never 404s the whole catalog.
+  const hiddenFromStorefront = !previewMode && productIsUnavailable(config, productKey)
 
+  // Every hook must run before any conditional return, otherwise React sees a
+  // different hook count on the render that 404s and throws.
   const { toggle: toggleCart, has: cartHas } = useCart()
-  // Hiding a product must hide its page too. The public config only lists
-  // active products, so once it has loaded, a key that is absent from it is
-  // either hidden or gone: show the 404 instead of falling back to the
-  // built-in catalog copy, which would keep a retired product fully readable
-  // (and indexable) at its direct URL.
-  // Only trust a config that actually returned products. If the Worker is
-  // unreachable the hook falls back to an empty list, and treating that as
-  // "everything is hidden" would 404 the whole catalog during an outage.
-  const hiddenFromStorefront = !previewMode && Boolean(config?.products?.length) && !saved
   const inCart = cartHas(product.key)
   // The three buy buttons on this page (nav, pricing, final CTA) all skip the
   // cart, so consent is taken in a confirm step here rather than inline beside
@@ -162,8 +151,23 @@ export default function ProductPage({ theme, onToggleTheme, palette, onPaletteCh
   }
   const onToggleCart = () => toggleCart(product.key)
 
+  // A hidden or deleted product is indistinguishable from a bad URL to the
+  // public, so both render the same 404.
   if (hiddenFromStorefront) {
     return <NotFound theme={theme} onToggleTheme={onToggleTheme} palette={palette} onPaletteChange={onPaletteChange} />
+  }
+
+  if (!inCatalog && !live) {
+    return (
+      <div className="product-not-found">
+        <div className="shell">
+          <p className="eyebrow">PRODUCT NOT FOUND</p>
+          <h1>This product is not in the suite.</h1>
+          <p>The link may be out of date, or the product may no longer be available.</p>
+          <Link className="button primary" to="/"><ArrowLeft size={15} /> Back to the suite</Link>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -193,7 +197,7 @@ export default function ProductPage({ theme, onToggleTheme, palette, onPaletteCh
         <ProductFAQ product={product} supportEmail={config?.supportEmail || SUPPORT_EMAIL} />
         <FinalCTA product={product} onBuy={onBuy} offer={product.offer} />
       </main>
-      <Footer products={config?.products?.length ? config.products : defaultProducts()} supportEmail={config?.supportEmail || SUPPORT_EMAIL} />
+      <Footer products={storefrontProducts(config, defaultProducts())} supportEmail={config?.supportEmail || SUPPORT_EMAIL} />
       <CheckoutConsentModal
         open={consentOpen}
         productName={product.name}
