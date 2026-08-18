@@ -8,7 +8,8 @@ APP_ORIGIN = "https://your-domain.com"
 SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
 OWNER_EMAIL = "owner@your-domain.com"
 TRUSTPILOT_REVIEW_URL = "https://www.trustpilot.com/review/your-domain.com"
-EMAIL_FROM = "Runway Systems <delivery@your-domain.com>"
+EMAIL_FROM_DELIVERY = "delivery@your-domain.com"
+EMAIL_FROM_INFO = "info@your-domain.com"
 SUPPORT_EMAIL = "support@your-domain.com"
 
 [[d1_databases]]

@@ -177,7 +177,7 @@ function SuccessPage({ theme, onToggleTheme }) {
               </div>
             )}
             <div className="success-delivery-grid">
-              <div><Mail /><p><b>Check your inbox</b><span>Resend delivers each private copy link after verified payment. Check spam if it has not arrived.</span></p></div>
+              <div><Mail /><p><b>Check your inbox</b><span>Brevo delivers each private copy link after verified payment. Check spam if it has not arrived.</span></p></div>
               <div><ShieldCheck /><p><b>Protected backup access</b><span>Sign in with {profile?.email || 'your checkout account'} whenever you need to request a link again.</span></p></div>
             </div>
             <div className="success-followup"><Mail /><p><b>A neutral check-in follows in about three days.</b><span>Every verified buyer receives the same invitation to share an honest Trustpilot review or private feedback.</span></p></div>

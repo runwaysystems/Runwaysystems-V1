@@ -174,8 +174,9 @@ async function readinessReport(env) {
     ['APP_ORIGIN', 'Storefront origin allowlist'],
     ['SUPABASE_URL', 'Supabase project URL'],
     ['SUPABASE_ANON_KEY', 'Supabase anon key secret'],
-    ['RESEND_API_KEY', 'Resend API key'],
-    ['EMAIL_FROM', 'Resend sender address'],
+    ['BREVO_API_KEY', 'Brevo API key'],
+    ['EMAIL_FROM_DELIVERY', 'Brevo delivery sender address'],
+    ['EMAIL_FROM_INFO', 'Brevo info sender address'],
     ['RATE_LIMIT_SALT', 'Rate-limit salt'],
     ['FEEDBACK_SIGNING_SECRET', 'Feedback signing secret'],
   ]
@@ -1542,26 +1543,31 @@ function escapeHtml(value) {
     .replaceAll("'", '&#039;')
 }
 
-async function sendResend(env, message) {
-  if (!env.RESEND_API_KEY || !env.EMAIL_FROM) throw new Error('Resend is not configured')
-  const response = await fetch('https://api.resend.com/emails', {
+// Brevo transactional email (no Brevo templates: the full HTML body is built
+// in code by emailLayout and sent as raw htmlContent, so template ids and
+// params are not involved). Sender selection is per message so each mail
+// type leaves from its own verified address.
+async function sendBrevo(env, message) {
+  if (!env.BREVO_API_KEY || !message.from) throw new Error('Brevo is not configured')
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      'api-key': env.BREVO_API_KEY,
       'Content-Type': 'application/json',
-      ...(message.idempotencyKey ? { 'Idempotency-Key': message.idempotencyKey } : {}),
+      Accept: 'application/json',
     },
     body: JSON.stringify({
-      from: env.EMAIL_FROM,
-      to: [message.to],
+      sender: { email: message.from, name: message.fromName || 'Runway Systems' },
+      to: [{ email: message.to }],
       subject: message.subject,
-      html: message.html,
-      text: message.text,
+      htmlContent: message.html,
+      textContent: message.text,
+      ...(message.idempotencyKey ? { headers: { 'X-Runway-Idempotency-Key': message.idempotencyKey } } : {}),
     }),
   })
   if (!response.ok) {
-    console.error('Resend request failed', response.status)
-    throw new Error(`Resend returned ${response.status}`)
+    console.error('Brevo request failed', response.status)
+    throw new Error(`Brevo returned ${response.status}`)
   }
 }
 
@@ -1596,8 +1602,9 @@ async function sendDeliveryEmail(env, purchase, product) {
   const title = `Your ${productName} access is ready${name}.`
   const intro = `Your payment is confirmed. Use the private Google Sheets link below to create your ${productName} copy. Your purchase also remains available in your Runway Systems account library.`
   const footer = `Account library: ${accountUrl}\nNeed help? ${env.SUPPORT_EMAIL || 'Contact Runway Systems support.'}`
-  await sendResend(env, {
+  await sendBrevo(env, {
     to: purchase.customer_email,
+    from: env.EMAIL_FROM_DELIVERY,
     subject: `Your ${productName} access is ready`,
     idempotencyKey: `runway-delivery-${purchase.id}`,
     html: emailLayout(title, intro, 'Make my private Google Sheets copy', deliveryUrl, footer, null, `RUNWAY SYSTEMS / ${productName.toUpperCase()}`),
@@ -1652,8 +1659,9 @@ async function sendReviewEmail(env, request, settings) {
   const prompt = settings.emailTemplateText || `How's ${productName.toUpperCase()} working for you?`
   const intro = 'Your honest experience helps Runway Systems improve. Every verified buyer receives this same neutral invitation, regardless of their experience or rating. You can leave an independent Trustpilot review or send private feedback directly to our team.'
   const footer = `This invitation is sent consistently to verified buyers. The private feedback link expires after 30 days. Need help? ${env.SUPPORT_EMAIL || 'Contact Runway Systems support.'}`
-  await sendResend(env, {
+  await sendBrevo(env, {
     to: request.email,
+    from: env.EMAIL_FROM_INFO,
     subject: prompt,
     idempotencyKey: `runway-review-${request.id}`,
     html: emailLayout(
@@ -2036,7 +2044,7 @@ async function getIntegrationStatus(env) {
   return [
     { id: 'lemonsqueezy', label: 'Lemon Squeezy', status: env.LEMONSQUEEZY_API_KEY && env.LEMONSQUEEZY_WEBHOOK_SECRET ? 'connected' : 'setup', detail: 'Merchant of record: Lemon Squeezy handles global sales tax and remittance for your orders' },
     { id: 'supabase', label: 'Supabase', status: env.SUPABASE_URL && env.SUPABASE_ANON_KEY ? 'connected' : 'setup', detail: 'Google OAuth and account verification' },
-    { id: 'email', label: 'Resend', status: env.RESEND_API_KEY && env.EMAIL_FROM ? 'connected' : 'setup', detail: 'Delivery and neutral review invitations' },
+    { id: 'email', label: 'Brevo', status: env.BREVO_API_KEY && env.EMAIL_FROM_DELIVERY && env.EMAIL_FROM_INFO ? 'connected' : 'setup', detail: 'Delivery and neutral review invitations' },
     { id: 'trustpilot', label: 'Trustpilot', status: env.TRUSTPILOT_REVIEW_URL ? 'connected' : 'setup', detail: 'Neutral invitation for every verified buyer' },
     { id: 'ai', label: 'AI image scanning', status: aiMode ? 'connected' : 'setup', detail: aiMode === 'binding' ? 'Workers AI binding analyzes uploaded screenshots and writes feature copy' : aiMode === 'rest' ? 'Workers AI REST access writes feature headings and subheadings' : 'Add the AI binding or AI_ACCOUNT_ID and AI_API_TOKEN for auto-written feature copy' },
   ]

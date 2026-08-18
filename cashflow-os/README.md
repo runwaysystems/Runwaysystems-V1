@@ -21,7 +21,7 @@ Production-oriented React and Vite storefront for the **Runway Systems** suite, 
 - Custom Google OAuth interface backed by `@supabase/supabase-js`
 - Server-created Lemon Squeezy checkouts, one variant per product
 - Lemon Squeezy webhook signature verification and idempotent D1 entitlements
-- Dual delivery through Resend email and an authenticated account library
+- Dual delivery through Brevo email and an authenticated account library
 - Signed, expiring feedback links with purchase ownership checks
 - Neutral Trustpilot invitation for every verified buyer
 - Private feedback and pending-first on-site testimonial moderation
@@ -39,11 +39,11 @@ Browser
        -> Supabase token validation
        -> Lemon Squeezy checkout and verified webhooks
        -> Cloudflare D1
-       -> Resend transactional email
+       -> Brevo transactional email
        -> protected Google Sheets delivery secret
 ```
 
-The browser contains only public configuration. The Lemon Squeezy API key and webhook secret, Resend keys, the Google Sheets `/copy` URL, rate-limit salt, and feedback signing secret stay in Cloudflare Worker secrets.
+The browser contains only public configuration. The Lemon Squeezy API key and webhook secret, Brevo key, the Google Sheets `/copy` URL, rate-limit salt, and feedback signing secret stay in Cloudflare Worker secrets.
 
 ## Local storefront
 
@@ -140,7 +140,8 @@ Edit `worker/wrangler.toml`:
 - `SUPABASE_URL`: public Supabase project URL
 - `OWNER_EMAIL`: final owner account email
 - `TRUSTPILOT_REVIEW_URL`: final public business review URL
-- `EMAIL_FROM`: sender on an authenticated Resend domain
+- `EMAIL_FROM_DELIVERY`: verified Brevo sender for delivery email (e.g. `delivery@your-domain.com`)
+- `EMAIL_FROM_INFO`: verified Brevo sender for review invitations (e.g. `info@your-domain.com`)
 - `SUPPORT_EMAIL`: final public support address
 
 `APP_ORIGIN` can contain a comma-separated allowlist if a controlled staging origin is also needed. Avoid wildcards.
@@ -159,7 +160,7 @@ For production, set each secret with Wrangler:
 npx wrangler secret put LEMONSQUEEZY_API_KEY --config worker/wrangler.toml
 npx wrangler secret put LEMONSQUEEZY_WEBHOOK_SECRET --config worker/wrangler.toml
 npx wrangler secret put SUPABASE_ANON_KEY --config worker/wrangler.toml
-npx wrangler secret put RESEND_API_KEY --config worker/wrangler.toml
+npx wrangler secret put BREVO_API_KEY --config worker/wrangler.toml
 npx wrangler secret put GOOGLE_SHEETS_COPY_URL --config worker/wrangler.toml
 npx wrangler secret put RATE_LIMIT_SALT --config worker/wrangler.toml
 npx wrangler secret put FEEDBACK_SIGNING_SECRET --config worker/wrangler.toml
@@ -226,16 +227,21 @@ Before launch, use Lemon Squeezy test mode to prove:
 - Full refund revocation
 - Payment success before webhook arrival
 - Full refund revokes the account entitlement and cancels any unsent review request
-- Resend delivery retry after a temporary failure without duplicate messages
+- Brevo delivery retry after a temporary failure without duplicate messages
 
-## Resend setup
+## Brevo setup
 
-1. Add the production sending domain in Resend.
-2. Publish its SPF and DKIM records.
-3. Wait for domain verification.
-4. Create a restricted API key for this Worker.
-5. Set `EMAIL_FROM` to a sender on that domain.
+1. Add the production sending domain in Brevo and verify it (DNS records).
+2. Publish its SPF and DKIM records (Brevo guides you through both).
+3. Wait for domain verification, then confirm the sender addresses used by
+   the Worker: `EMAIL_FROM_DELIVERY` (e.g. `delivery@…`) and
+   `EMAIL_FROM_INFO` (e.g. `info@…`).
+4. Create a transactional (SMTP) API key for this Worker in Brevo.
+5. Set the two sender addresses in `worker/wrangler.toml`.
 6. Test delivery to Gmail, Outlook, and a custom domain.
+
+Emails are sent through Brevo's transactional API with the HTML built in
+code, so no templates need to be created in Brevo.
 
 The payment webhook queues delivery and the Cron Trigger retries failures. Review email is neutral and consistent for every verified buyer. It offers an independent Trustpilot review and a separate private feedback path without rating-based selection.
 
@@ -336,7 +342,7 @@ In a second terminal, pass the same safe local webhook signing value to the Work
 LEMONSQUEEZY_WEBHOOK_SECRET='your-local-test-value' npm run test:worker
 ```
 
-The Worker regression checks the D1 health path, exact-origin CORS, public configuration exposure, JSON enforcement, unauthenticated route rejection, Lemon Squeezy signature verification and event replay idempotency, Cron execution, telemetry persistence, and sanitized error responses. Delete `worker/.dev.vars` after testing. For a complete pre-launch test, also use Lemon Squeezy test mode, a verified Supabase test user, and a Resend test recipient to exercise checkout, owner enforcement, email delivery, signed feedback, and refund revocation end to end.
+The Worker regression checks the D1 health path, exact-origin CORS, public configuration exposure, JSON enforcement, unauthenticated route rejection, Lemon Squeezy signature verification and event replay idempotency, Cron execution, telemetry persistence, and sanitized error responses. Delete `worker/.dev.vars` after testing. For a complete pre-launch test, also use Lemon Squeezy test mode, a verified Supabase test user, and a Brevo test recipient to exercise checkout, owner enforcement, email delivery, signed feedback, and refund revocation end to end.
 
 ## Final launch checklist
 
@@ -354,7 +360,7 @@ The Worker regression checks the D1 health path, exact-origin CORS, public confi
 - Confirm all testimonials begin pending and only approved entries appear publicly.
 - Confirm every verified buyer receives the same Trustpilot invitation.
 - Confirm `/admin` returns no data to non-owner accounts.
-- Confirm Resend SPF and DKIM pass.
+- Confirm Brevo SPF and DKIM pass.
 - Confirm Lemon Squeezy live webhook signatures validate.
 - Confirm D1 migrations are applied before Worker deployment.
 - Confirm direct SPA routes work on the production host.

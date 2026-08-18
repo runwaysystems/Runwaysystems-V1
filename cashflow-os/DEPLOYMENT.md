@@ -10,12 +10,12 @@ Cloudflare Pages                     Cloudflare Workers
        │  ───────────────────────────▶     │  R2 bucket (uploaded product media)
        │                                   │  Workers AI (optional image scanning)
        │                                   │  Lemon Squeezy webhooks,
-       │                                   │  Supabase auth, Resend email
+       │                                   │  Supabase auth, Brevo email
 ```
 
 - **Pages** serves the frontend (the `dist/` folder).
 - **Workers** runs `worker/src/index.js` with a D1 database, an R2 media
-  bucket, and secrets for Lemon Squeezy, Supabase, Resend, and delivery links.
+  bucket, and secrets for Lemon Squeezy, Supabase, Brevo, and delivery links.
 
 Everything below can be done with the dashboard or the CLI. A one-command
 script is included: `./scripts/deploy.sh` (see the bottom of this file).
@@ -31,7 +31,7 @@ script is included: `./scripts/deploy.sh` (see the bottom of this file).
    npx wrangler login
    ```
 3. **Lemon Squeezy account** with a store, **Supabase project** with
-   Google OAuth, and a **Resend** sending domain. You need each product's
+   Google OAuth, and a **Brevo** sending domain. You need each product's
    Google Sheets template shared as a `/copy` link.
 
 ---
@@ -73,7 +73,8 @@ Edit `worker/wrangler.toml` for non-secret values:
 | `SUPABASE_URL` | Your Supabase project URL |
 | `OWNER_EMAIL` | Your admin account email |
 | `TRUSTPILOT_REVIEW_URL` | Public Trustpilot review URL |
-| `EMAIL_FROM` | Sender on your verified Resend domain |
+| `EMAIL_FROM_DELIVERY` | Verified Brevo sender for delivery email, e.g. `delivery@your-domain.com` |
+| `EMAIL_FROM_INFO` | Verified Brevo sender for review invitations, e.g. `info@your-domain.com` |
 | `SUPPORT_EMAIL` | Public support address |
 
 Then set secrets (never commit these):
@@ -82,7 +83,7 @@ Then set secrets (never commit these):
 npx wrangler secret put LEMONSQUEEZY_API_KEY --config worker/wrangler.toml
 npx wrangler secret put LEMONSQUEEZY_WEBHOOK_SECRET --config worker/wrangler.toml
 npx wrangler secret put SUPABASE_ANON_KEY --config worker/wrangler.toml
-npx wrangler secret put RESEND_API_KEY --config worker/wrangler.toml
+npx wrangler secret put BREVO_API_KEY --config worker/wrangler.toml
 npx wrangler secret put GOOGLE_SHEETS_COPY_URL --config worker/wrangler.toml
 npx wrangler secret put RATE_LIMIT_SALT --config worker/wrangler.toml
 npx wrangler secret put FEEDBACK_SIGNING_SECRET --config worker/wrangler.toml
@@ -200,7 +201,7 @@ separate tax registration is needed on your side.
 - [ ] **Admin → Content studio** loads and lets you edit suite copy, a
       product's marketing content, and the legal policies; saving one flows
       to the public storefront within the config cache window (60s)
-- [ ] **Admin → Integrations** shows Lemon Squeezy, Supabase, Resend, and
+- [ ] **Admin → Integrations** shows Lemon Squeezy, Supabase, Brevo, and
       Trustpilot connected (and AI if configured)
 - [ ] **Admin → Products** has Lemon Squeezy variant IDs and delivery links
       per product

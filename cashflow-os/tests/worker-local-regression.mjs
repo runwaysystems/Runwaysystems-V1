@@ -99,7 +99,7 @@ check('cashflow-os defaults remain the anchor offer', Boolean(cashflowPublic)
   && cashflowPublic.salePrice === '$39', publicConfig.text)
 // Banned names must appear as JSON keys (or secret-style identifiers), so
 // legitimate values such as paymentProvider:"lemonsqueezy" stay allowed.
-check('public configuration leaks no privileged names', !/"RESEND|GOOGLE_SHEETS|SUPABASE_ANON|FEEDBACK_SIGNING|"activePriceId"|"lemonVariantId"|"deliveryUrl"/i.test(publicConfig.text))
+check('public configuration leaks no privileged names', !/"BREVO|GOOGLE_SHEETS|SUPABASE_ANON|FEEDBACK_SIGNING|"activePriceId"|"lemonVariantId"|"deliveryUrl"/i.test(publicConfig.text))
 
 if (OWNER_TOKEN) {
   const ownerHeaders = { Authorization: `Bearer ${OWNER_TOKEN}` }
