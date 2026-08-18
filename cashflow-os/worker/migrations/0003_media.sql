@@ -1,0 +1,2 @@
+ALTER TABLE products ADD COLUMN hero_image TEXT NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN feature_images TEXT NOT NULL DEFAULT '[]';

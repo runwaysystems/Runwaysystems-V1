@@ -1,0 +1,33 @@
+{
+  "name": "cashflow-os-storefront",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/generate-sitemap.mjs",
+    "preview": "vite preview",
+    "test:regression": "node tests/ledger-fold-regression.mjs",
+    "test:worker": "node tests/worker-local-regression.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.109.0",
+    "@vitejs/plugin-react": "latest",
+    "gsap": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-router-dom": "latest",
+    "three": "^0.185.1",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1",
+    "playwright": "^1.55.1",
+    "wrangler": "4.122.0"
+  }
+}

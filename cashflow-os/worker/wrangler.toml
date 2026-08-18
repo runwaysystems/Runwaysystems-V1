@@ -1,0 +1,30 @@
+name = "cashflow-os-platform"
+main = "src/index.js"
+compatibility_date = "2026-08-13"
+
+# Public, non-secret Worker configuration. Replace placeholders before deploy.
+[vars]
+APP_ORIGIN = "https://your-domain.com"
+SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
+OWNER_EMAIL = "owner@your-domain.com"
+TRUSTPILOT_REVIEW_URL = "https://www.trustpilot.com/review/your-domain.com"
+EMAIL_FROM = "Runway Systems <delivery@your-domain.com>"
+SUPPORT_EMAIL = "support@your-domain.com"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cashflow-os-platform"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "runway-product-media"
+
+# Optional AI image scanning for feature headings uses the Workers AI REST API
+# via the AI_ACCOUNT_ID and AI_API_TOKEN secrets (see README), or a manually
+# added "AI" Workers AI binding. Neither is required: without them, owners
+# write feature headings and subheadings by hand.
+
+[triggers]
+crons = ["*/5 * * * *"]

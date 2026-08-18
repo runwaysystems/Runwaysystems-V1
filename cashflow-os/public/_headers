@@ -1,0 +1,12 @@
+# Security headers for the storefront served by Cloudflare Pages.
+# The CSP below assumes the platform Worker runs on *.workers.dev and
+# Supabase on *.supabase.co. If you use custom domains, add them to
+# connect-src (the Worker API origin) before deploying.
+
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://widget.trustpilot.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://*.workers.dev https://*.supabase.co; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self' https://*.supabase.co https://accounts.google.com; frame-ancestors 'none'

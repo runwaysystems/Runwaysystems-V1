@@ -1,0 +1,7 @@
+/* /index.html 200
+
+# Dynamic sitemap: products created later in the admin panel appear in the
+# Worker's /sitemap.xml automatically. Proxy it onto this hostname by
+# replacing the URL with your deployed Worker domain and uncommenting:
+# /sitemap.xml https://YOUR_WORKER_SUBDOMAIN.workers.dev/sitemap.xml 200
+

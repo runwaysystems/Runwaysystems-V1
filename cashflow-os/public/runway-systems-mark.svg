@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">
+  <title>Runway Systems Ledger Fold</title>
+  <desc>Interlocking folded ledger sheets form the Runway Systems RS symbol.</desc>
+  <path fill="#C9A227" fill-rule="evenodd" d="M9 10h28l15 14v16L43 49l9 21H33l-8-19v19H9V10zm16 14v13h10l4-4v-5l-4-4H25z"/>
+  <path fill="#C9A227" opacity=".72" d="M70 10H49L38 21v14l11 9h8l3 3v4l-4 5H40L28 70h32l11-14V40l-11-9h-8l-3-3v-3l4-4h17V10z"/>
+  <path fill="none" stroke="#F0D98E" stroke-width=".8" opacity=".55" d="M40 8v64"/>
+</svg>

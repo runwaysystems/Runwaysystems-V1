@@ -1,0 +1,3 @@
+# Local download artifacts, never part of the source
+*.zip
+*.patch
