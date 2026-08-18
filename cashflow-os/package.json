@@ -11,6 +11,7 @@
     "build": "vite build && node scripts/generate-sitemap.mjs",
     "preview": "vite preview",
     "test:regression": "node tests/ledger-fold-regression.mjs",
+    "test:visibility": "node tests/product-visibility-regression.mjs",
     "test:worker": "node tests/worker-local-regression.mjs"
   },
   "dependencies": {

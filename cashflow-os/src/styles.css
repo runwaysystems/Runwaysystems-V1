@@ -1216,6 +1216,19 @@ body, .navbar, .section, .proof-strip, .feature-card, .audience-card, .price-car
   margin-top: 40px;
 }
 
+/* Shown when the owner has hidden every product, so the section reads as a
+   deliberate pause rather than a broken grid. */
+.catalog-empty {
+  margin-top: 40px;
+  padding: 46px 24px;
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  color: var(--ink-soft);
+  text-align: center;
+}
+
+[data-theme='dark'] .catalog-empty { border-color: var(--dark-line); color: var(--muted); }
+
 .product-card {
   position: relative;
   display: flex;
