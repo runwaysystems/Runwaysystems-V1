@@ -146,6 +146,10 @@ vite.config.ts.timestamp-*
 .wrangler/
 .dev.vars
 
+# Database backups contain real customer data and must never be committed.
+# They belong in the R2 backups bucket or in workflow artifacts only.
+backups/
+
 # Local download artifacts
 *.zip
 *.patch

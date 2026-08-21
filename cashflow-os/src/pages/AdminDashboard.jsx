@@ -62,6 +62,8 @@ import Seo from '../components/Seo'
 import AdminTOTPSetup from '../components/AdminTOTPSetup'
 import AdminTotpPrompt from '../components/AdminTotpPrompt'
 import AdminAuditLog from '../components/AdminAuditLog'
+import AdminDeliveryIssues from '../components/AdminDeliveryIssues'
+import AdminClientErrors from '../components/AdminClientErrors'
 
 const metricConfig = [
   { key: 'totalSales', label: 'Sales', icon: ShoppingBag, format: (value) => value.toLocaleString() },
@@ -1167,6 +1169,7 @@ export default function AdminDashboard() {
             ['#bundles', 'Bundles'],
             ['#offers', 'Offers'],
             ['#moderation', 'Reviews'],
+            ['#operations', 'Operations'],
             ['#settings', 'Store settings'],
             ['#integrations', 'Integrations'],
             ['#security', 'Security'],
@@ -1240,6 +1243,21 @@ export default function AdminDashboard() {
           notify={setNotice}
         />
         <TestimonialTable items={testimonials} onModerate={moderate} pendingId={moderatingId} />
+
+        <section className="admin-section-card" id="operations">
+          <header className="admin-section-head">
+            <div><span className="eyebrow">HEALTH AND RECOVERY</span><h2>Operations</h2></div>
+            <Activity size={20} />
+          </header>
+          <p className="admin-section-hint">
+            Live from the platform database: delivery emails that need your attention, and errors your
+            visitors' browsers reported to the Worker. Failed deliveries recover themselves for 5 attempts;
+            anything still listed here after that needs the Retry button.
+          </p>
+          <AdminDeliveryIssues />
+          <AdminClientErrors />
+        </section>
+
         <div className="admin-bottom-grid">
           <SettingsPanel settings={settings} onSave={saveSettings} saving={savingSettings} />
           <IntegrationPanel integrations={integrations} />

@@ -275,3 +275,35 @@ cd cashflow-os
 The script uses the `CLOUDFLARE_API_TOKEN` environment variable if present,
 otherwise your existing `wrangler login` session. Set `PAGES_PROJECT` to
 override the Pages project name (default `runway-systems-storefront`).
+
+---
+
+## 7. Backups, uptime monitoring and CI
+
+Deployment is only half of running the platform. After the first deploy,
+finish the operational setup too:
+
+**CI (no setup needed)**. Every push and pull request runs
+`.github/workflows/ci.yml`: storefront build, the jsdom and browser
+regressions, and the full Worker API regression against a local D1 + mock
+Supabase. A red CI run means do not deploy.
+
+**Nightly database backups.** `.github/workflows/backup.yml` exports D1
+every night into the R2 bucket `runway-d1-backups` plus a 30-day workflow
+artifact. Arm it by adding two repository secrets:
+
+- `CLOUDFLARE_API_TOKEN` - a token with D1 read/export and R2 edit access
+- `CLOUDFLARE_ACCOUNT_ID` - from the Cloudflare dashboard overview page
+
+Until the secrets exist the workflow skips itself silently. A manual dump
+any time: `./scripts/backup-d1.sh --bucket runway-d1-backups`.
+
+**Uptime monitoring.** `.github/workflows/uptime.yml` probes the Worker's
+`/health` and the storefront every 15 minutes; GitHub emails repository
+watchers when it fails. Arm it with two repository variables:
+`WORKER_HEALTH_URL` (e.g. `https://<worker>.workers.dev/health`) and
+`STOREFRONT_URL`. GitHub scheduled runs can lag under load, so for
+paging-grade alerts also point a dedicated monitor (UptimeRobot, Better
+Stack) at `/health`.
+
+**Full restore and incident playbooks**: see [RECOVERY.md](RECOVERY.md).

@@ -456,6 +456,9 @@
 .status-approved { color: #b7c49d; background: rgba(145, 174, 109, .11); }
 .status-pending { color: #d3bd72; background: rgba(201, 162, 39, .1); }
 .status-rejected { color: #c9958a; background: rgba(224, 112, 89, .1); }
+.status-failed { color: #c9958a; background: rgba(224, 112, 89, .12); }
+.status-sending { color: #a9b6c6; background: rgba(130, 150, 175, .12); }
+.status-sent { color: #b7c49d; background: rgba(145, 174, 109, .11); }
 .moderation-actions { display: flex; gap: 5px; }
 .moderation-actions button { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid rgba(255, 255, 255, .08); border-radius: 7px; color: #858d9a; background: rgba(255, 255, 255, .025); }
 .moderation-actions button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 32%, transparent); color: var(--accent); }
@@ -1452,3 +1455,11 @@
 @media (max-width: 720px) {
   .audit-log__table { display: block; overflow-x: auto; }
 }
+
+/* Operations panels: delivery issues and client-side error telemetry. */
+.ops-panel { margin: 18px 0 0; }
+.ops-panel:first-of-type { margin-top: 6px; }
+.ops-panel .audit-log__table td { max-width: 260px; }
+.ops-cell-truncate { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.ops-panel__warning { margin: 10px 0 0; padding: 10px 14px; border: 1px solid rgba(224, 112, 89, .35); border-radius: 10px; background: rgba(224, 112, 89, .08); color: #f0a89a; font-size: 12px; }
+.ops-panel__notice { margin: 10px 0 0; padding: 10px 14px; border: 1px solid rgba(145, 174, 109, .35); border-radius: 10px; background: rgba(145, 174, 109, .08); color: #b7c49d; font-size: 12px; }
