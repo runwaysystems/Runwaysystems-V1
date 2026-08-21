@@ -194,7 +194,8 @@ function writeMockState(state) {
   }
 }
 
-async function request(path, { method = 'GET', body, token, keepalive = false } = {}) {
+async function request(path, { method = 'GET', body, token, keepalive = false, totp, recovery } = {}) {
+  const activeTotp = !totp && isAdminPath(path) ? getActiveAdminTotp() : ''
   let response
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
@@ -202,6 +203,9 @@ async function request(path, { method = 'GET', body, token, keepalive = false } 
       headers: {
         ...(body ? { 'Content-Type': 'application/json' } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(activeTotp ? { 'X-Admin-TOTP': activeTotp } : {}),
+        ...(totp ? { 'X-Admin-TOTP': totp } : {}),
+        ...(recovery ? { 'X-Admin-Recovery': recovery } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
       cache: 'no-store',
@@ -214,6 +218,97 @@ async function request(path, { method = 'GET', body, token, keepalive = false } 
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(payload.message || `Request failed with status ${response.status}`)
   return payload
+}
+
+// Module-level current admin TOTP code. Set by the admin dashboard
+// whenever the user enters a fresh 6-digit code, cleared after 5 minutes
+// of inactivity. Every request() call below automatically injects it
+// into the X-Admin-TOTP header if the path is an admin route.
+//
+// Persistence: stored in sessionStorage so a page refresh keeps the
+// user signed in for the 5-minute window, but a closed tab clears it.
+// Using sessionStorage (not localStorage) means the code never survives
+// across browser sessions; using it (not memory-only) means a refresh
+// or accidental nav-back does not force the user to re-type the code
+// they just entered.
+const ADMIN_TOTP_STORAGE_KEY = 'runway.admin.totp.v1'
+const ADMIN_TOTP_TTL_MS = 5 * 60 * 1000
+
+function readStoredTotp() {
+  if (typeof window === 'undefined' || !window.sessionStorage) return ''
+  try {
+    const raw = window.sessionStorage.getItem(ADMIN_TOTP_STORAGE_KEY)
+    if (!raw) return ''
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return ''
+    if (typeof parsed.code !== 'string' || typeof parsed.expiresAt !== 'number') return ''
+    if (Date.now() > parsed.expiresAt) {
+      window.sessionStorage.removeItem(ADMIN_TOTP_STORAGE_KEY)
+      return ''
+    }
+    return parsed.code
+  } catch {
+    return ''
+  }
+}
+
+function writeStoredTotp(code) {
+  if (typeof window === 'undefined' || !window.sessionStorage) return
+  try {
+    if (!code) {
+      window.sessionStorage.removeItem(ADMIN_TOTP_STORAGE_KEY)
+      return
+    }
+    window.sessionStorage.setItem(ADMIN_TOTP_STORAGE_KEY, JSON.stringify({
+      code,
+      expiresAt: Date.now() + ADMIN_TOTP_TTL_MS,
+    }))
+  } catch {
+    // sessionStorage may be disabled (private mode quota, etc). The
+    // in-memory value below is still used for the current page load.
+  }
+}
+
+let memoryTotp = ''
+let memoryTotpExpiresAt = 0
+function readMemoryTotp() {
+  if (!memoryTotp) return ''
+  if (Date.now() > memoryTotpExpiresAt) {
+    memoryTotp = ''
+    memoryTotpExpiresAt = 0
+    return ''
+  }
+  return memoryTotp
+}
+function writeMemoryTotp(code) {
+  memoryTotp = code
+  memoryTotpExpiresAt = code ? Date.now() + ADMIN_TOTP_TTL_MS : 0
+}
+
+export function setActiveAdminTotp(code) {
+  const normalised = String(code || '').replace(/\D/g, '').slice(0, 6)
+  writeStoredTotp(normalised)
+  writeMemoryTotp(normalised)
+  return normalised
+}
+
+export function getActiveAdminTotp() {
+  // sessionStorage is the source of truth across reloads; the in-memory
+  // copy covers the same-tab fast path and the no-storage fallback.
+  const stored = readStoredTotp()
+  if (stored) {
+    writeMemoryTotp(stored)
+    return stored
+  }
+  const fromMemory = readMemoryTotp()
+  if (!fromMemory) {
+    writeMemoryTotp('')
+    return ''
+  }
+  return fromMemory
+}
+function isAdminPath(path) {
+  return typeof path === 'string' && path.startsWith('/admin/')
 }
 
 function requireRemoteApi() {
@@ -288,6 +383,12 @@ export async function getPurchaseDelivery(purchaseId, { token } = {}) {
   requireRemoteApi()
   if (!purchaseId || !token) throw new Error('A verified purchase is required.')
   return request(`/account/purchases/${encodeURIComponent(purchaseId)}/delivery`, { method: 'POST', token, body: {} })
+}
+
+export async function resendPurchaseDelivery(purchaseId, { token } = {}) {
+  requireRemoteApi()
+  if (!purchaseId || !token) throw new Error('A verified purchase is required.')
+  return request(`/account/purchases/${encodeURIComponent(purchaseId)}/resend-delivery`, { method: 'POST', token, body: {} })
 }
 
 export async function getPurchaseFeedbackLink(purchaseId, { token } = {}) {
@@ -610,3 +711,39 @@ export async function deleteProductFeature(productKey, featureId, { token } = {}
 }
 
 export { API_BASE_URL }
+
+export async function getAdminTOTPStatus({ token } = {}) {
+  if (API_BASE_URL) return request('/admin/totp/status', { token })
+  await wait()
+  return { enrolled: false, verified: false, enrolledAt: '', lastUsedAt: '' }
+}
+
+export async function enrollAdminTOTP({ token, totp } = {}) {
+  if (API_BASE_URL) return request('/admin/totp/enrol', { method: 'POST', body: {}, token, totp })
+  await wait()
+  return { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/Runway%20Systems%20Admin?secret=JBSWY3DPEHPK3PXP&issuer=Runway%20Systems', recoveryCodes: ['0000-1111', '2222-3333'] }
+}
+
+export async function verifyAdminTOTP(body, { token, totp } = {}) {
+  if (API_BASE_URL) return request('/admin/totp/verify', { method: 'POST', body, token, totp })
+  await wait()
+  return { verified: true }
+}
+
+export async function resetAdminTOTP({ token, totp } = {}) {
+  if (API_BASE_URL) return request('/admin/totp/reset', { method: 'POST', body: {}, token, totp })
+  await wait()
+  return { reset: true }
+}
+
+export async function getAdminAuditLog({ limit = 100, entityType = '', subjectId = '' } = {}, { token } = {}) {
+  if (API_BASE_URL) {
+    const params = new URLSearchParams()
+    params.set('limit', String(limit))
+    if (entityType) params.set('entityType', entityType)
+    if (subjectId) params.set('subjectId', subjectId)
+    return request(`/admin/audit-log?${params.toString()}`, { token })
+  }
+  await wait()
+  return []
+}

@@ -59,6 +59,9 @@ import { Logo } from '../components/Brand'
 import { isSupabaseConfigured } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import Seo from '../components/Seo'
+import AdminTOTPSetup from '../components/AdminTOTPSetup'
+import AdminTotpPrompt from '../components/AdminTotpPrompt'
+import AdminAuditLog from '../components/AdminAuditLog'
 
 const metricConfig = [
   { key: 'totalSales', label: 'Sales', icon: ShoppingBag, format: (value) => value.toLocaleString() },
@@ -275,16 +278,12 @@ function SettingsPanel({ settings, onSave, saving }) {
         <label className="portal-field admin-wide-field">
           <span>Trustpilot business review URL</span>
           <input type="url" value={form.trustpilotBusinessUrl || ''} onChange={(event) => update('trustpilotBusinessUrl', event.target.value)} placeholder="https://www.trustpilot.com/review/..." />
+          <small>Used as the destination on every verified buyer's neutral review invitation email, and as the "Read all reviews" link in the storefront. The on-site TrustBox widget is no longer used.</small>
         </label>
         <label className="portal-field">
           <span>Support email</span>
           <input type="email" maxLength="120" value={form.supportEmail || ''} onChange={(event) => update('supportEmail', event.target.value)} placeholder="support@your-domain.com" />
           <small>Shown in the footer, FAQs, and checkout help. Overrides the VITE_SUPPORT_EMAIL fallback.</small>
-        </label>
-        <label className="portal-field">
-          <span>Trustpilot business unit ID</span>
-          <input maxLength="80" value={form.trustpilotBusinessUnitId || ''} onChange={(event) => update('trustpilotBusinessUnitId', event.target.value)} placeholder="5a9f3212b1e64c21d8b5e1ab" />
-          <small>Enables the live Trustpilot reviews widget on pricing cards, subject to cookie consent.</small>
         </label>
         <div className="admin-settings-footer">
           <p><ShieldCheck size={14} /> Safe configuration only. Secrets are never shown here.</p>
@@ -1170,6 +1169,7 @@ export default function AdminDashboard() {
             ['#moderation', 'Reviews'],
             ['#settings', 'Store settings'],
             ['#integrations', 'Integrations'],
+            ['#security', 'Security'],
           ].map(([href, label]) => <a key={href} href={href}>{label}</a>)}
         </nav>
 
@@ -1244,6 +1244,17 @@ export default function AdminDashboard() {
           <SettingsPanel settings={settings} onSave={saveSettings} saving={savingSettings} />
           <IntegrationPanel integrations={integrations} />
         </div>
+
+        <section className="admin-section-card" id="security">
+          <header className="admin-section-head">
+            <div><span className="eyebrow">ACCESS CONTROL</span><h2>Security</h2></div>
+            <ShieldCheck size={20} />
+          </header>
+          <p className="admin-section-hint">Every admin change requires a fresh sign-in (≤30 min old) and a 6-digit code from an authenticator app. Use the prompt below to load the code for the next 5 minutes, or enrol below if you have not yet.</p>
+          <AdminTotpPrompt />
+          <AdminTOTPSetup />
+          <AdminAuditLog />
+        </section>
       </main>
     </div>
   )

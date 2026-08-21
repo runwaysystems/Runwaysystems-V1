@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft, ArrowUpRight, CheckCircle2, Mail, MessageSquareText, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { deleteAccount, getAccountPurchases, getPurchaseDelivery, getPurchaseFeedbackLink } from '../api/platformApi'
+import { deleteAccount, getAccountPurchases, getPurchaseDelivery, getPurchaseFeedbackLink, resendPurchaseDelivery } from '../api/platformApi'
 import { AccountButton } from '../components/AuthUI'
 import { Logo } from '../components/Brand'
 import { SUPPORT_EMAIL } from '../components/StorefrontShell'
@@ -32,6 +32,13 @@ function formatAmount(cents, currency = 'usd') {
 
 function formatDate(value) {
   return new Intl.DateTimeFormat('en-US', { dateStyle: 'medium' }).format(new Date(value))
+}
+
+function deliveryStatusLabel(status) {
+  if (status === 'sent') return 'Delivery email sent'
+  if (status === 'failed') return 'Delivery email could not be sent — try resending below'
+  if (status === 'sending') return 'Delivery email is being sent'
+  return 'Delivery email is being prepared'
 }
 
 export default function AccountPage() {
@@ -104,6 +111,21 @@ export default function AccountPage() {
     }
   }
 
+  const resendDelivery = async (purchaseId) => {
+    setWorkingId(`resend:${purchaseId}`)
+    setError('')
+    try {
+      await resendPurchaseDelivery(purchaseId, { token: session.access_token })
+      // Optimistically flip the status so the button disappears; the next
+      // library load will reconcile to whatever the Worker actually wrote.
+      setPurchases((current) => current.map((entry) => (entry.id === purchaseId ? { ...entry, deliveryEmailStatus: 'pending' } : entry)))
+    } catch (resendError) {
+      setError(resendError.message || 'The delivery email could not be requeued.')
+    } finally {
+      setWorkingId('')
+    }
+  }
+
   return (
     <div className="portal-page account-page">
       <Seo
@@ -167,7 +189,14 @@ export default function AccountPage() {
                       <div className="purchase-kicker"><CheckCircle2 size={14} /> Payment verified</div>
                       <h3>{productName}</h3>
                       <p className="purchase-meta">Purchased {formatDate(purchase.createdAt)} · {formatAmount(purchase.amountTotal, purchase.currency)}</p>
-                      <p className="purchase-delivery-status"><Mail size={14} /> Delivery email {purchase.deliveryEmailStatus === 'sent' ? 'sent' : 'is being prepared'}</p>
+                      <p className="purchase-delivery-status"><Mail size={14} /> {deliveryStatusLabel(purchase.deliveryEmailStatus)}</p>
+                      {purchase.deliveryEmailStatus === 'failed' && (
+                        <p className="purchase-resend-row">
+                          <button className="button text" type="button" onClick={() => resendDelivery(purchase.id)} disabled={Boolean(workingId)}>
+                            <RefreshCw size={14} /> {workingId === `resend:${purchase.id}` ? 'Requeuing…' : 'Resend delivery email'}
+                          </button>
+                        </p>
+                      )}
                       <div className="purchase-actions">
                         <button className="button primary" type="button" onClick={() => openDelivery(purchase.id)} disabled={Boolean(workingId)}>
                           {workingId === `delivery:${purchase.id}` ? 'Verifying...' : 'Create private Google Sheets copy'} <ArrowUpRight size={15} />
