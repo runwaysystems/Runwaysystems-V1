@@ -314,6 +314,47 @@ async function getAdminAuditLog(env, { limit = 100, entityType = '', subjectId =
   })
 }
 
+async function getAdminClientErrors(env, { limit = 50 } = {}) {
+  if (!env.DB) return []
+  const safeLimit = Math.min(200, Math.max(1, Number(limit) || 50))
+  const result = await env.DB.prepare(`
+    SELECT id, kind, message, stack, url, user_agent AS userAgent, created_at AS createdAt
+    FROM client_errors
+    ORDER BY created_at DESC LIMIT ?
+  `).bind(safeLimit).all()
+  return result.results || []
+}
+
+// Paid purchases whose delivery email never completed: hard failures, rows
+// stuck mid-send, and pending rows old enough that the 5-minute cron should
+// have delivered them already. This is the owner-facing view of Layer 13:
+// a queue row that exhausts its 5 retries must be visible somewhere, not
+// just printed into logs nobody reads.
+async function getDeliveryIssues(env) {
+  if (!env.DB) return { issues: [] }
+  const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+  const pendingGrace = new Date(Date.now() - 15 * 60 * 1000).toISOString()
+  const result = await env.DB.prepare(`
+    SELECT id, product_key AS productKey, customer_email AS customerEmail,
+           delivery_email_status AS status, delivery_email_attempts AS attempts,
+           delivery_email_last_error AS lastError, delivery_email_next_eligible_at AS nextEligibleAt,
+           created_at AS createdAt, updated_at AS updatedAt
+    FROM purchases
+    WHERE payment_status = 'paid'
+      AND (
+        delivery_email_status = 'failed'
+        OR (delivery_email_status = 'sending' AND updated_at <= ?)
+        OR (delivery_email_status = 'pending' AND (delivery_email_attempts > 0 OR created_at <= ?))
+      )
+    ORDER BY updated_at DESC LIMIT 100
+  `).bind(staleBefore, pendingGrace).all()
+  const issues = (result.results || []).map((row) => ({
+    ...row,
+    permanent: row.status === 'failed' && Number(row.attempts || 0) >= 5,
+  }))
+  return { issues }
+}
+
 function getAllowedOrigins(env) {
   return String(env.APP_ORIGIN || '')
     .split(',')
@@ -1422,6 +1463,26 @@ function userIsOwner(user, env) {
 //     TOTP gate then makes a single factor (a leaked JWT) insufficient.
 const ADMIN_MUTATION_JWT_MAX_AGE_SECONDS = 30 * 60
 
+// Read the issued-at time straight from the JWT payload. Supabase verified
+// the token signature during authenticate(), so decoding claims here adds
+// no new trust; it only recovers a field the /auth/v1/user resource is not
+// guaranteed to echo back. Without this fallback a provider that omits
+// `iat` from the user resource would make every admin mutation look
+// infinitely stale and 401 forever.
+function jwtIssuedAt(request) {
+  try {
+    const token = bearerToken(request)
+    const [, payload] = token.split('.')
+    if (!payload) return 0
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4)
+    const claims = JSON.parse(atob(padded))
+    return Number(claims?.iat || 0)
+  } catch {
+    return 0
+  }
+}
+
 async function requireOwner(request, env, { mutation = false } = {}) {
   const user = await authenticate(request, env)
   if (!userIsOwner(user, env)) throw new HttpError(403, 'Owner access required')
@@ -1429,7 +1490,7 @@ async function requireOwner(request, env, { mutation = false } = {}) {
 
   // Recency check. The `iat` claim is seconds since epoch. We allow up to
   // 5s clock skew so a near-fresh token is not rejected.
-  const iat = Number(user?.iat || 0)
+  const iat = Number(user?.iat || 0) || jwtIssuedAt(request)
   const ageSeconds = iat ? Math.floor(Date.now() / 1000) - iat : Number.POSITIVE_INFINITY
   if (!iat || ageSeconds > ADMIN_MUTATION_JWT_MAX_AGE_SECONDS + 5) {
     logEvent('warn', 'admin_mutation_stale_jwt', { subjectId: user.id, ageSeconds })
@@ -2464,6 +2525,52 @@ async function trackPageView(request, env) {
   `).bind(date).run()
 }
 
+// ---------------------------------------------------------------------------
+// Client-side error telemetry (Layer 12). The storefront reports render
+// crashes and unhandled script errors here so a failure a visitor hits is
+// visible to the owner in the dashboard and in structured logs, instead of
+// dying silently in one browser console. Payloads are strictly capped,
+// PII-redacted before storage, rate-limited per IP, and retained 30 days
+// (pruned by the cron tick). The source IP is only kept as a salted hash.
+const CLIENT_ERROR_KINDS = new Set(['render', 'error', 'unhandledrejection'])
+const CLIENT_ERROR_RETENTION_DAYS = 30
+
+async function handleClientErrorEvent(request, env) {
+  await rateLimit(request, env, 'client-error', 30, 3600)
+  const body = await readJson(request)
+  // cleanText rejects anything over the cap outright: telemetry endpoints
+  // must not become a free D1 write amplification channel.
+  const message = cleanText(body.message, 500, 'Error message')
+  const kind = CLIENT_ERROR_KINDS.has(String(body.kind || '')) ? String(body.kind) : 'error'
+  const stack = cleanText(body.stack || '', 4000, 'Stack', { required: false })
+  const pageUrl = cleanText(body.url || '', 300, 'Page URL', { required: false })
+  if (pageUrl && !pageUrl.startsWith('/') && !/^https?:\/\//i.test(pageUrl)) {
+    throw new HttpError(400, 'Invalid page URL')
+  }
+  const ip = request.headers.get('CF-Connecting-IP') || ''
+  const ipHash = ip && env.RATE_LIMIT_SALT ? await sha256Hex(`${env.RATE_LIMIT_SALT}:${ip}`) : ''
+  const row = {
+    id: makeId('cerr'),
+    kind,
+    message: redactPii(message),
+    stack: redactPii(stack),
+    url: redactPii(pageUrl),
+    userAgent: String(request.headers.get('User-Agent') || '').slice(0, 300),
+    ipHash,
+  }
+  // A failed telemetry write must not surface as an error to the visitor's
+  // browser (which would generate more telemetry); log and accept anyway.
+  try {
+    await env.DB.prepare(`
+      INSERT INTO client_errors (id, kind, message, stack, url, user_agent, ip_hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(row.id, row.kind, row.message, row.stack, row.url, row.userAgent, row.ipHash, nowIso()).run()
+  } catch (error) {
+    logEvent('warn', 'client_error_store_failed', { error: error?.message })
+  }
+  logEvent('error', 'client_error', { id: row.id, kind: row.kind, message: row.message, url: row.url })
+}
+
 async function getIntegrationStatus(env) {
   const aiMode = env.AI ? 'binding' : (env.AI_ACCOUNT_ID && env.AI_API_TOKEN ? 'rest' : '')
   return [
@@ -2527,6 +2634,10 @@ async function handleRequest(request, env, ctx) {
   }
   if (path === '/events/page-view' && request.method === 'POST') {
     await trackPageView(request, env)
+    return json(request, env, { accepted: true }, 202)
+  }
+  if (path === '/events/client-error' && request.method === 'POST') {
+    await handleClientErrorEvent(request, env)
     return json(request, env, { accepted: true }, 202)
   }
   if (path === '/testimonials' && request.method === 'GET') {
@@ -2884,6 +2995,40 @@ async function handleRequest(request, env, ctx) {
       const subjectId = cleanText(url.searchParams.get('subjectId') || '', 80, 'subjectId', { required: false })
       return json(request, env, await getAdminAuditLog(env, { limit, entityType, subjectId }), 200, { 'Cache-Control': 'no-store' })
     }
+
+    if (path === '/admin/client-errors' && request.method === 'GET') {
+      const limit = Number(url.searchParams.get('limit') || 50)
+      return json(request, env, await getAdminClientErrors(env, { limit }), 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (path === '/admin/delivery-issues' && request.method === 'GET') {
+      return json(request, env, await getDeliveryIssues(env), 200, { 'Cache-Control': 'no-store' })
+    }
+
+    // Owner-triggered redelivery for a purchase that exhausted automatic
+    // retries. Being a POST under /admin/ it automatically requires the
+    // fresh-JWT + TOTP gate, and the action is written to the audit log.
+    match = routeMatch(path, /^\/admin\/delivery-issues\/([^/]+)\/retry$/)
+    if (match && request.method === 'POST') {
+      const purchaseId = decodeURIComponent(match[1])
+      await rateLimit(request, env, 'admin-delivery-retry', 30, 3600, ownerUser.id)
+      const reset = await env.DB.prepare(`
+        UPDATE purchases
+        SET delivery_email_status = 'pending',
+            delivery_email_attempts = 0,
+            delivery_email_next_eligible_at = '',
+            delivery_email_last_error = NULL,
+            updated_at = ?
+        WHERE id = ? AND payment_status = 'paid' AND delivery_email_status != 'sent'
+        RETURNING id, product_key
+      `).bind(nowIso(), purchaseId).first()
+      if (!reset) throw new HttpError(404, 'No undelivered paid purchase with that id')
+      await writeAuditLog(env, request, ownerUser, 'delivery.retry', { entityType: 'purchase', entityId: purchaseId, details: { productKey: reset.product_key } })
+      // Try the send immediately instead of waiting for the next cron tick;
+      // deliverPurchaseEmail re-claims the row itself, so a { id } is enough.
+      ctx.waitUntil(deliverPurchaseEmail(env, { id: purchaseId }))
+      return json(request, env, { retried: true, purchaseId }, 200, { 'Cache-Control': 'no-store' })
+    }
   }
 
   throw new HttpError(404, 'Endpoint not found')
@@ -2910,6 +3055,20 @@ export default {
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(processEmailQueues(env))
+    ctx.waitUntil(runScheduledTasks(env))
   },
+}
+
+// One cron tick, two jobs: drive the email queues forward, then prune
+// telemetry rows past their retention window so client_errors cannot grow
+// without bound. Both are idempotent, so a retried tick is harmless.
+async function runScheduledTasks(env) {
+  await processEmailQueues(env)
+  if (!env.DB) return
+  try {
+    const cutoff = new Date(Date.now() - CLIENT_ERROR_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString()
+    await env.DB.prepare('DELETE FROM client_errors WHERE created_at < ?').bind(cutoff).run()
+  } catch (error) {
+    logEvent('warn', 'client_error_prune_failed', { error: error?.message })
+  }
 }

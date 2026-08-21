@@ -327,13 +327,22 @@ node --check worker/src/index.js
 
 The browser regression covers the Ledger Fold identity, intro and reduced motion, screenshots, responsive layout, approved-only testimonials, protected routes, secure delivery architecture, neutral review policy, and the U+2014 character prohibition.
 
-Apply the migration to a real local D1 binding and start the Worker:
+Apply the migrations to a local D1 binding and start the Worker:
 
 ```bash
-npx wrangler d1 migrations apply cashflow-os-platform --local --config worker/wrangler.toml
 cp worker/.dev.vars.example worker/.dev.vars
 # Replace each value in worker/.dev.vars with safe local test values.
+npx wrangler d1 migrations apply cashflow-os-platform --local --config worker/wrangler.toml
+# Note: the local apply works in batches; rerun it until every migration
+# shows a success status. scripts/test-worker-local.sh does this for you.
 npx wrangler dev --local --config worker/wrangler.toml
+```
+
+Or run the whole local harness in one command (migrations, mock Supabase
+fixture, dev server, cleanup, then the regression suite):
+
+```bash
+./scripts/test-worker-local.sh
 ```
 
 In a second terminal, pass the same safe local webhook signing value to the Worker regression:
@@ -343,6 +352,25 @@ LEMONSQUEEZY_WEBHOOK_SECRET='your-local-test-value' npm run test:worker
 ```
 
 The Worker regression checks the D1 health path, exact-origin CORS, public configuration exposure, JSON enforcement, unauthenticated route rejection, Lemon Squeezy signature verification and event replay idempotency, Cron execution, telemetry persistence, and sanitized error responses. Delete `worker/.dev.vars` after testing. For a complete pre-launch test, also use Lemon Squeezy test mode, a verified Supabase test user, and a Brevo test recipient to exercise checkout, owner enforcement, email delivery, signed feedback, and refund revocation end to end.
+
+## Operations: CI, monitoring, backups
+
+- **CI**: every push and pull request runs `.github/workflows/ci.yml` -
+  storefront build, the jsdom/browser regressions, and the Worker API
+  regression against a local D1 with a mock Supabase. No setup required.
+- **Error tracking**: storefront crashes and unhandled browser errors are
+  reported to `POST /events/client-error` (rate-limited, PII-redacted,
+  retained 30 days) and listed in the owner dashboard under **Operations**,
+  alongside failed delivery emails with a one-click retry.
+- **Uptime**: `.github/workflows/uptime.yml` probes `/health` and the
+  storefront every 15 minutes once the `WORKER_HEALTH_URL` and
+  `STOREFRONT_URL` repository variables are set; a failed run emails the
+  repository watchers.
+- **Backups**: `.github/workflows/backup.yml` exports D1 nightly to the R2
+  bucket `runway-d1-backups` once `CLOUDFLARE_API_TOKEN` and
+  `CLOUDFLARE_ACCOUNT_ID` repository secrets are set. Manual dump:
+  `./scripts/backup-d1.sh`. Restore steps and incident playbooks live in
+  [RECOVERY.md](RECOVERY.md).
 
 ## Final launch checklist
 

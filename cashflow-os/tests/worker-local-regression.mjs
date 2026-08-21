@@ -775,12 +775,31 @@ const oversizedBody = await request('/events/page-view', {
 })
 check('oversized JSON bodies are rejected before parsing', oversizedBody.response.status === 413 && /too large/i.test(oversizedBody.payload?.message || ''), `${oversizedBody.response.status} ${oversizedBody.text.slice(0, 100)}`)
 
+// Client-side error telemetry (Layer 12): public ingestion with validation.
+const goodClientError = await request('/events/client-error', {
+  method: 'POST',
+  body: { kind: 'render', message: 'Checkout exploded for buyer@example.com', stack: 'Error at Checkout (app.js:1:1)', url: '/cart' },
+})
+check('client error events are accepted', goodClientError.response.status === 202 && goodClientError.payload?.accepted === true, `${goodClientError.response.status} ${goodClientError.text.slice(0, 160)}`)
+
+const noMessageEvent = await request('/events/client-error', { method: 'POST', body: { kind: 'render' } })
+check('client error events require a message', noMessageEvent.response.status === 400, `${noMessageEvent.response.status} ${noMessageEvent.text.slice(0, 160)}`)
+
+const unknownKindEvent = await request('/events/client-error', { method: 'POST', body: { kind: 'made-up-kind', message: 'still accepted' } })
+check('unknown client error kinds are normalised, not rejected', unknownKindEvent.response.status === 202, `${unknownKindEvent.response.status}`)
+
+const badUrlEvent = await request('/events/client-error', { method: 'POST', body: { message: 'ok', url: 'javascript:alert(1)' } })
+check('client error page URLs must be paths or http(s)', badUrlEvent.response.status === 400, `${badUrlEvent.response.status} ${badUrlEvent.text.slice(0, 160)}`)
+
 for (const [path, method] of [
   ['/account/purchases', 'GET'],
   ['/account', 'DELETE'],
   ['/checkout/session', 'POST'],
   ['/admin/analytics', 'GET'],
   ['/admin/products/cashflow-os/upload', 'POST'],
+  ['/admin/client-errors', 'GET'],
+  ['/admin/delivery-issues', 'GET'],
+  ['/admin/delivery-issues/pur_missing/retry', 'POST'],
   ['/feedback/access?token=unsigned', 'GET'],
 ]) {
   const protectedResponse = await request(path, { method, body: method === 'POST' ? {} : undefined })
@@ -893,15 +912,19 @@ if (OWNER_TOKEN) {
 // Consent gates payment, so it is enforced server-side and recorded, not
 // merely rendered as a checkbox.
 if (OWNER_TOKEN) {
-  const ownerHeaders = { Authorization: `Bearer ${OWNER_TOKEN}` }
-  const noConsent = await request('/checkout/session', { method: 'POST', headers: ownerHeaders, body: { productKeys: ['cashflow-os'] } })
+  // Consent negatives run as the buyer identity, not the owner: checkout
+  // consumes a per-user budget (8/10min) plus a per-email daily budget (4),
+  // which the Lemon Squeezy section above rightfully exhausts for the
+  // owner account. The mock Supabase maps this token to a second user.
+  const buyerHeaders = { Authorization: 'Bearer local-buyer-token' }
+  const noConsent = await request('/checkout/session', { method: 'POST', headers: buyerHeaders, body: { productKeys: ['cashflow-os'] } })
   check('checkout is refused when consent is absent', noConsent.response.status === 400
     && /accept the terms/i.test(noConsent.payload?.message || ''), `${noConsent.response.status} ${noConsent.text.slice(0, 140)}`)
 
-  const falseConsent = await request('/checkout/session', { method: 'POST', headers: ownerHeaders, body: { productKeys: ['cashflow-os'], consent: false } })
+  const falseConsent = await request('/checkout/session', { method: 'POST', headers: buyerHeaders, body: { productKeys: ['cashflow-os'], consent: false } })
   check('checkout is refused when consent is false', falseConsent.response.status === 400, `${falseConsent.response.status}`)
 
-  const truthyConsent = await request('/checkout/session', { method: 'POST', headers: ownerHeaders, body: { productKeys: ['cashflow-os'], consent: 'yes' } })
+  const truthyConsent = await request('/checkout/session', { method: 'POST', headers: buyerHeaders, body: { productKeys: ['cashflow-os'], consent: 'yes' } })
   check('a truthy string does not count as consent', truthyConsent.response.status === 400, `${truthyConsent.response.status}`)
 }
 
@@ -940,6 +963,20 @@ if (OWNER_TOKEN) {
 
   const removed = await request(`/admin/products/${dupKey}`, { method: 'DELETE', headers: ownerHeaders })
   check('a duplicated product can be deleted again', removed.response.status === 200, `${removed.response.status}`)
+
+  // Layer 12/13 owner visibility: the telemetry posted earlier in this run
+  // must be listed, PII-redacted; delivery issues must be enumerable.
+  const clientErrors = await request('/admin/client-errors?limit=20', { headers: ownerHeaders })
+  const reportedError = Array.isArray(clientErrors.payload)
+    ? clientErrors.payload.find((row) => typeof row.message === 'string' && row.message.includes('Checkout exploded'))
+    : null
+  check('owner can list reported client errors', clientErrors.response.status === 200 && Boolean(reportedError), clientErrors.text.slice(0, 200))
+  check('stored client errors carry no personal email', Boolean(reportedError)
+    && !reportedError.message.includes('buyer@example.com')
+    && reportedError.message.includes('[REDACTED]'), reportedError?.message || 'row not found')
+
+  const deliveryIssues = await request('/admin/delivery-issues', { headers: ownerHeaders })
+  check('owner can list delivery issues', deliveryIssues.response.status === 200 && Array.isArray(deliveryIssues.payload?.issues), deliveryIssues.text.slice(0, 200))
 }
 
 const failures = results.filter((result) => !result.condition)

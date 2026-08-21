@@ -1,8 +1,11 @@
 import { Component } from 'react'
+import { reportClientError } from '../lib/errorReporting'
 
 // Root error boundary. Without it, any render-time crash unmounts the whole
 // React tree and the visitor sees a blank white page with no explanation.
-// This paints the failure visibly so it can be reported and fixed.
+// This paints the failure visibly so it can be reported and fixed - and it
+// also reports the crash to the platform Worker so the owner actually finds
+// out it happened (see the Operations section of the dashboard).
 const redactPii = (value) => String(value ?? '')
   .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[REDACTED]')
   .slice(0, 400)
@@ -19,6 +22,11 @@ export default class AppErrorBoundary extends Component {
 
   componentDidCatch(error, info) {
     console.error('Storefront render failed', redactPii(error?.message), info?.componentStack)
+    reportClientError({
+      kind: 'render',
+      message: error?.message,
+      stack: error?.stack || info?.componentStack || '',
+    })
   }
 
   render() {

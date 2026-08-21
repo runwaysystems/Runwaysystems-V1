@@ -747,3 +747,28 @@ export async function getAdminAuditLog({ limit = 100, entityType = '', subjectId
   await wait()
   return []
 }
+
+export async function getAdminClientErrors({ limit = 50 } = {}, { token } = {}) {
+  if (API_BASE_URL) {
+    const params = new URLSearchParams({ limit: String(limit) })
+    return request(`/admin/client-errors?${params.toString()}`, { token })
+  }
+  await wait()
+  return []
+}
+
+export async function getAdminDeliveryIssues({ token } = {}) {
+  if (API_BASE_URL) return request('/admin/delivery-issues', { token })
+  await wait()
+  return { issues: [] }
+}
+
+// POST mutation: the live Worker requires the fresh-JWT + TOTP admin gate
+// (the request() helper injects the cached TOTP code automatically).
+export async function retryDeliveryIssue(purchaseId, { token } = {}) {
+  if (API_BASE_URL) {
+    return request(`/admin/delivery-issues/${encodeURIComponent(purchaseId)}/retry`, { method: 'POST', token })
+  }
+  await wait()
+  return { retried: true, purchaseId }
+}
