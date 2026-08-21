@@ -18,6 +18,12 @@ const SITE_COPY_DEFAULTS = {
     motto: 'Built for clarity. Designed for action.',
     supportNotes: ['Google Sheets only', 'Mon-Fri support'],
     disclaimer: 'These products are tools, not financial or tax advice.',
+    socials: [
+      { id: 'instagram', label: 'Instagram', url: '', visible: false },
+      { id: 'youtube',   label: 'YouTube',   url: '', visible: false },
+      { id: 'x',         label: 'X',         url: '', visible: false },
+      { id: 'linkedin',  label: 'LinkedIn',  url: '', visible: false },
+    ],
   },
   cart: {
     emptyTitle: 'Your cart is empty',
@@ -81,3 +87,63 @@ export function useSiteCopy() {
 }
 
 export { SITE_COPY_DEFAULTS }
+
+// Resolve the configured socials to the list the footer should actually render.
+// Rows with no URL, a malformed URL, or `visible: false` are dropped. The
+// remaining list is returned in the order it was saved so the owner controls
+// the visual order via the admin's reorder controls.
+export function visibleSocials(copy) {
+  const list = copy?.footer?.socials
+  if (!Array.isArray(list)) return []
+  return list
+    .filter((row) => row && row.visible && typeof row.url === 'string' && row.url.trim())
+    .map((row) => ({
+      id: String(row.id || '').trim().toLowerCase(),
+      label: String(row.label || '').trim() || 'Social link',
+      url: row.url.trim(),
+    }))
+    .filter((row) => /^https?:\/\//i.test(row.url))
+}
+
+// Normalize any saved socials list so it always has a stable `id` and the
+// fields the editor expects. Used by the admin before showing the form so
+// legacy data (missing id, mixed case) is migrated on save.
+export function normalizeSocials(list) {
+  if (!Array.isArray(list)) return []
+  return list
+    .filter((row) => row && typeof row === 'object')
+    .map((row, index) => {
+      const id = String(row.id || row.label || `social-${index + 1}`).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `social-${index + 1}`
+      return {
+        id,
+        label: String(row.label || '').trim() || 'Social link',
+        url: typeof row.url === 'string' ? row.url.trim() : '',
+        visible: Boolean(row.visible),
+      }
+    })
+}
+
+// Map a social id to a lucide-react icon name. The bundled icon set is
+// intentionally small (Globe, Link, Mail, AtSign, MessageCircle, Music2,
+// Cloud) so the footer stays consistent: a recognised platform gets a
+// distinctive glyph, anything unknown falls back to a neutral link icon.
+export const SOCIAL_ICON_NAMES = {
+  instagram: 'AtSign',
+  youtube:   'MessageCircle',
+  x:         'Link',
+  twitter:   'Link',
+  linkedin:  'Link',
+  facebook:  'Globe',
+  tiktok:    'Music2',
+  threads:   'AtSign',
+  github:    'Link',
+  mastodon:  'Globe',
+  pinterest: 'Link',
+  reddit:    'MessageCircle',
+  bluesky:   'Cloud',
+  website:   'Globe',
+}
+
+export function socialIconName(id) {
+  return SOCIAL_ICON_NAMES[String(id || '').trim().toLowerCase()] || 'Link'
+}

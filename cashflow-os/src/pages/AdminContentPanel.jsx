@@ -1,8 +1,19 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Globe, Layers, Megaphone, Save, ShoppingBag, ScrollText } from 'lucide-react'
+import {
+  ArrowDown,
+  ArrowUp,
+  Globe,
+  Layers,
+  Megaphone,
+  Plus,
+  Save,
+  ShoppingBag,
+  ScrollText,
+  Trash2,
+} from 'lucide-react'
 import { buildPoliciesViewModel } from '../data/policies'
 import { buildProductViewModel } from '../data/catalog'
-import { SITE_COPY_DEFAULTS } from '../lib/siteCopy'
+import { normalizeSocials, SITE_COPY_DEFAULTS, socialIconName } from '../lib/siteCopy'
 
 const cx = (...classes) => classes.filter(Boolean).join(' ')
 
@@ -225,6 +236,39 @@ const SUITE_FIELDS = [
 // Site copy schema: every storefront string outside the catalog, policies,
 // and per-product content. Grouped by the surface it appears on.
 
+const SOCIAL_PLACEHOLDER_URLS = {
+  instagram: 'https://instagram.com/your-handle',
+  youtube: 'https://youtube.com/@your-handle',
+  x: 'https://x.com/your-handle',
+  twitter: 'https://x.com/your-handle',
+  linkedin: 'https://www.linkedin.com/company/your-name',
+  facebook: 'https://facebook.com/your-page',
+  tiktok: 'https://tiktok.com/@your-handle',
+  threads: 'https://threads.net/@your-handle',
+  github: 'https://github.com/your-handle',
+  mastodon: 'https://mastodon.social/@your-handle',
+  pinterest: 'https://pinterest.com/your-handle',
+  reddit: 'https://reddit.com/user/your-handle',
+  bluesky: 'https://bsky.app/profile/your-handle.bsky.social',
+  website: 'https://your-domain.com',
+}
+
+const SOCIAL_SUGGESTIONS = [
+  { id: 'instagram', label: 'Instagram' },
+  { id: 'youtube',   label: 'YouTube' },
+  { id: 'x',         label: 'X' },
+  { id: 'linkedin',  label: 'LinkedIn' },
+  { id: 'facebook',  label: 'Facebook' },
+  { id: 'tiktok',    label: 'TikTok' },
+  { id: 'threads',   label: 'Threads' },
+  { id: 'github',    label: 'GitHub' },
+  { id: 'pinterest', label: 'Pinterest' },
+  { id: 'mastodon',  label: 'Mastodon' },
+  { id: 'reddit',    label: 'Reddit' },
+  { id: 'bluesky',   label: 'Bluesky' },
+  { id: 'website',   label: 'Website' },
+]
+
 const SITE_COPY_GROUPS = [
   {
     key: 'homeSeo',
@@ -245,6 +289,7 @@ const SITE_COPY_GROUPS = [
       ['supportNotes', 'Support column notes (one per line, two lines)', 'list'],
       ['disclaimer', 'Bottom disclaimer', 'text'],
     ],
+    renderExtras: 'socials',
   },
   {
     key: 'cart',
@@ -304,6 +349,128 @@ const SITE_COPY_GROUPS = [
   },
 ]
 
+function SocialLinksEditor({ value, onChange }) {
+  // Local working copy. The parent supplies either the saved D1 list or a
+  // draft, and the parent owns the save action.
+  const list = useMemo(() => normalizeSocials(value), [value])
+  const [picker, setPicker] = useState('')
+
+  const updateAll = (next) => {
+    onChange(normalizeSocials(next))
+  }
+
+  const updateRow = (id, patch) => {
+    updateAll(list.map((row) => (row.id === id ? { ...row, ...patch } : row)))
+  }
+
+  const moveRow = (id, direction) => {
+    const index = list.findIndex((row) => row.id === id)
+    if (index === -1) return
+    const target = index + direction
+    if (target < 0 || target >= list.length) return
+    const next = [...list]
+    const [moved] = next.splice(index, 1)
+    next.splice(target, 0, moved)
+    updateAll(next)
+  }
+
+  const removeRow = (id) => {
+    updateAll(list.filter((row) => row.id !== id))
+  }
+
+  const addFromPicker = (id) => {
+    if (!id) return
+    const suggestion = SOCIAL_SUGGESTIONS.find((s) => s.id === id)
+    if (!suggestion) return
+    if (list.some((row) => row.id === suggestion.id)) {
+      setPicker('')
+      return
+    }
+    updateAll([
+      ...list,
+      { id: suggestion.id, label: suggestion.label, url: '', visible: false },
+    ])
+    setPicker('')
+  }
+
+  const addCustom = () => {
+    const id = `social-${Date.now()}`
+    updateAll([...list, { id, label: '', url: '', visible: false }])
+  }
+
+  const availableSuggestions = SOCIAL_SUGGESTIONS.filter((s) => !list.some((row) => row.id === s.id))
+
+  return (
+    <div className="socials-editor">
+      <div className="socials-editor__list" role="list">
+        {list.map((row, index) => {
+          const trimmedUrl = (row.url || '').trim()
+          const urlLooksValid = !trimmedUrl || /^https?:\/\//i.test(trimmedUrl)
+          return (
+            <article className="socials-editor__row" key={row.id} role="listitem">
+              <div className="socials-editor__handle" aria-hidden="true">
+                <button type="button" onClick={() => moveRow(row.id, -1)} disabled={index === 0} aria-label={`Move ${row.label || 'social link'} up`}><ArrowUp size={13} /></button>
+                <button type="button" onClick={() => moveRow(row.id, 1)} disabled={index === list.length - 1} aria-label={`Move ${row.label || 'social link'} down`}><ArrowDown size={13} /></button>
+              </div>
+              <div className="socials-editor__fields">
+                <label className="portal-field">
+                  <span>Label</span>
+                  <input
+                    maxLength="40"
+                    value={row.label}
+                    placeholder={SOCIAL_SUGGESTIONS.find((s) => s.id === row.id)?.label || 'Channel name'}
+                    onChange={(event) => updateRow(row.id, { label: event.target.value })}
+                  />
+                </label>
+                <label className="portal-field admin-wide-field">
+                  <span>URL</span>
+                  <input
+                    type="url"
+                    maxLength="500"
+                    value={row.url}
+                    placeholder={SOCIAL_PLACEHOLDER_URLS[row.id] || 'https://'}
+                    onChange={(event) => updateRow(row.id, { url: event.target.value })}
+                  />
+                  <small>Must start with https://. Hidden automatically if blank or invalid.</small>
+                </label>
+              </div>
+              <label className="toggle-setting socials-editor__toggle">
+                <span><b>Show in footer</b><small>{row.visible ? 'Live on the storefront' : 'Hidden — saved but not shown'}</small></span>
+                <input
+                  type="checkbox"
+                  checked={row.visible}
+                  onChange={(event) => updateRow(row.id, { visible: event.target.checked })}
+                />
+                <i aria-hidden="true" />
+              </label>
+              <div className="socials-editor__status">
+                {row.visible && !trimmedUrl && <span className="status-pill status-pending">Add a URL</span>}
+                {row.visible && trimmedUrl && !urlLooksValid && <span className="status-pill status-rejected">URL must start with https://</span>}
+                {row.visible && trimmedUrl && urlLooksValid && <span className="status-pill status-approved">Live</span>}
+                {!row.visible && <span className="status-pill">Hidden</span>}
+              </div>
+              <button className="button text button--small socials-editor__remove" type="button" onClick={() => removeRow(row.id)} aria-label={`Remove ${row.label || 'social link'}`}>
+                <Trash2 size={13} /> Remove
+              </button>
+            </article>
+          )
+        })}
+        {!list.length && <p className="table-empty">No social links yet. Add one below.</p>}
+      </div>
+      <div className="socials-editor__add">
+        <label className="portal-field">
+          <span>Add a social link</span>
+          <select value={picker} onChange={(event) => addFromPicker(event.target.value)}>
+            <option value="">Choose a platform...</option>
+            {availableSuggestions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+          </select>
+        </label>
+        <button className="button text" type="button" onClick={addCustom}><Plus size={14} /> Add custom</button>
+      </div>
+    </div>
+  )
+}
+
 function SiteCopyEditor({ settings, onSave, saving }) {
   const [draft, setDraft] = useState(null)
   const content = draft || settings.suiteContent?.siteCopy || {}
@@ -317,6 +484,10 @@ function SiteCopyEditor({ settings, onSave, saving }) {
 
   const update = (groupKey, path, type, value) => {
     setDraft(setAt(content, `${groupKey}.${path}`, type === 'list' ? splitRows(value) : value))
+  }
+
+  const updateSocials = (next) => {
+    setDraft(setAt(content, 'footer.socials', next))
   }
 
   const submit = () => {
@@ -357,6 +528,16 @@ function SiteCopyEditor({ settings, onSave, saving }) {
               <Field key={`${group.key}.${path}`} label={label} type={type} value={valueFor(group.key, path, type)} onChange={(value) => update(group.key, path, type, value)} />
             ))}
           </div>
+          {group.renderExtras === 'socials' && (
+            <div className="admin-settings-extras">
+              <h4>Social links</h4>
+              <p className="admin-settings-extras__hint">Add a link to your social channels. Each link has a label, a URL, and a visibility toggle. The footer shows only links with a valid https URL and the toggle on.</p>
+              <SocialLinksEditor
+                value={content.footer?.socials}
+                onChange={updateSocials}
+              />
+            </div>
+          )}
         </fieldset>
       ))}
       {draft && (

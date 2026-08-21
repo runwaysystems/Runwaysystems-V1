@@ -1,8 +1,9 @@
 // Cookie and local-storage consent state. Essential storefront storage
-// (cart, theme, sign-in persistence) stays active regardless; optional
-// third-party content such as the Trustpilot reviews widget is gated behind
-// explicit acceptance. The choice itself is stored in localStorage, which is
-// exempt from consent under ePrivacy.
+// (cart, theme, sign-in persistence) stays active regardless. No optional
+// third-party content is loaded on this site today; the choice is still
+// remembered so future additions can be gated behind explicit acceptance.
+// The choice itself is stored in localStorage, which is exempt from consent
+// under ePrivacy.
 
 const CONSENT_KEY = 'runway-consent'
 const listeners = new Set()

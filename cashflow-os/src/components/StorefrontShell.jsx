@@ -5,13 +5,18 @@ import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import {
   ArrowLeft,
   ArrowUpRight,
+  AtSign,
+  Cloud,
+  Globe,
+  Link as LinkIcon,
   LockKeyhole,
   Mail,
   Menu,
+  MessageCircle,
   Moon,
+  Music2,
   ShoppingBag,
   Sun,
-  X,
 } from 'lucide-react'
 import { AccountButton } from './AuthUI'
 import { Logo, RunwayMark } from './Brand'
@@ -20,7 +25,18 @@ import { markIntroSeenInSession } from '../lib/introState'
 import { useCart } from '../context/CartContext'
 import { openConsentPreferences } from './ConsentBanner'
 import { getPublicConfigCache } from '../lib/publicConfigCache'
-import { useSiteCopy } from '../lib/siteCopy'
+import { socialIconName, useSiteCopy, visibleSocials } from '../lib/siteCopy'
+
+// Lucide icon registry keyed by the names exposed from siteCopy. Anything not
+// in this map falls back to a neutral Link glyph on the storefront.
+const SOCIAL_ICONS = {
+  AtSign,
+  Cloud,
+  Globe,
+  Music2,
+  MessageCircle,
+  Link: LinkIcon,
+}
 
 // Env fallback only; the owner can override the support email from the admin
 // panel and it flows through the public config.
@@ -432,7 +448,9 @@ export function Navbar({ product = null, onBuy, theme, onToggleTheme, palette, o
 }
 
 export function Footer({ products = [], supportEmail = null }) {
-  const copy = useSiteCopy().footer
+  const fullCopy = useSiteCopy()
+  const copy = fullCopy.footer
+  const socials = visibleSocials(fullCopy)
   const email = supportEmail || getSupportEmail()
   const footerRef = useRef(null)
 
@@ -503,10 +521,31 @@ export function Footer({ products = [], supportEmail = null }) {
         <div className="footer-links">
           <div><b>Suite</b>{products.map((product) => <Link key={product.key} to={`/products/${product.key}`}>{product.name}</Link>)}</div>
           <div><b>Legal</b><Link to="/terms#terms">Terms of use</Link><Link to="/terms#privacy">Privacy</Link><Link to="/terms#refunds">Refund policy</Link><button className="footer-link-button" type="button" onClick={openConsentPreferences}>Cookie preferences</button></div>
+          {socials.length > 0 && (
+            <div className="footer-socials">
+              <b>Follow</b>
+              <ul className="footer-social-list" aria-label="Social links">
+                {socials.map((social) => {
+                  const IconComponent = SOCIAL_ICONS[socialIconName(social.id)] || LinkIcon
+                  return (
+                    <li key={social.id}>
+                      <a href={social.url} target="_blank" rel="noopener noreferrer" aria-label={social.label}>
+                        <IconComponent size={16} aria-hidden="true" />
+                        <span>{social.label}</span>
+                      </a>
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+          )}
           <div><b>Support</b><a href={`mailto:${email}`}><Mail size={14} /> {email}</a>{(copy.supportNotes || []).map((note) => <span key={note}>{note}</span>)}</div>
         </div>
       </div>
-      <div className="shell footer-bottom"><span>© {new Date().getFullYear()} {SUITE_NAME}. All rights reserved.</span><span>{copy.disclaimer}</span></div>
+      <div className="shell footer-bottom">
+        <span>© {new Date().getFullYear()} {SUITE_NAME}. All rights reserved.</span>
+        <span>{copy.disclaimer}</span>
+      </div>
     </footer>
   )
 }

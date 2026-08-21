@@ -3,15 +3,13 @@ import { Link } from 'react-router-dom'
 import { gsap } from 'gsap'
 import { Cookie, ShieldCheck } from 'lucide-react'
 import { clearConsent, getConsent, setConsent, subscribeConsent } from '../lib/consent'
-import { loadTrustpilot } from '../lib/trustpilot'
 import { getPublicConfigCache, subscribePublicConfig } from '../lib/publicConfigCache'
 
-const defaultDescription = 'Essential storage keeps your cart, theme, and sign-in working. Optional content such as the Trustpilot widget loads only if you accept.'
+const defaultDescription = 'Essential storage keeps your cart, theme, and sign-in working. No optional third-party content is loaded on this site.'
 
 // Cookie and privacy consent banner. Essential storefront storage (cart,
-// theme, sign-in) always stays active; accepting all also loads the optional
-// Trustpilot reviews widget. The choice is remembered until the visitor
-// reopens preferences from the footer.
+// theme, sign-in) always stays active. The choice is remembered until the
+// visitor reopens preferences from the footer.
 export default function ConsentBanner() {
   const bannerRef = useRef(null)
   const [visible, setVisible] = useState(() => !getConsent())
@@ -37,7 +35,6 @@ export default function ConsentBanner() {
   const choose = (value) => {
     setConsent(value)
     setVisible(false)
-    if (value === 'all') loadTrustpilot()
   }
 
   if (!visible) return null

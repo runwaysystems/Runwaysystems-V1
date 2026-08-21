@@ -3,7 +3,7 @@ import { getPublicConfig, subscribeToPlatformData } from '../api/platformApi'
 import { setPublicConfigCache } from '../lib/publicConfigCache'
 import { CONFIG_READY, CONFIG_UNAVAILABLE } from '../lib/catalogAvailability'
 
-// Loads the public platform config (products, Trustpilot URL, review policy).
+// Loads the public platform config (products, Trustpilot review URL, support email).
 // Returns null while loading. Preview mode resolves through the localStorage
 // adapter with the same shape as the Worker response.
 //
