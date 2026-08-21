@@ -144,6 +144,176 @@ function redactPii(value) {
     .slice(0, 400)
 }
 
+// Structured log helper. Emits a single-line JSON object so logs can be
+// ingested by any SIEM/Datadog/Honeycomb without a parser. All free-form
+// fields are passed through redactPii().
+function logEvent(level, event, fields = {}) {
+  const safe = {}
+  for (const [k, v] of Object.entries(fields)) {
+    safe[k] = typeof v === 'string' ? redactPii(v) : v
+  }
+  const line = JSON.stringify({ ts: nowIso(), level, event, ...safe })
+  if (level === 'error') console.error(line)
+  else if (level === 'warn') console.warn(line)
+  else console.log(line)
+}
+
+// RFC 4648 base32 (lowercase, no padding). Used for TOTP secrets so they
+// fit cleanly into authenticator apps (Google Authenticator, 1Password).
+const B32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567'
+function bytesToBase32(bytes) {
+  let bits = 0
+  let value = 0
+  let output = ''
+  for (const byte of bytes) {
+    value = (value << 8) | byte
+    bits += 8
+    while (bits >= 5) {
+      output += B32_ALPHABET[(value >>> (bits - 5)) & 0x1f]
+      bits -= 5
+    }
+  }
+  if (bits > 0) output += B32_ALPHABET[(value << (5 - bits)) & 0x1f]
+  return output
+}
+function base32ToBytes(input) {
+  const cleaned = String(input || '').toLowerCase().replace(/=+$/, '').replace(/\s+/g, '')
+  let bits = 0
+  let value = 0
+  const bytes = []
+  for (const ch of cleaned) {
+    const idx = B32_ALPHABET.indexOf(ch)
+    if (idx < 0) continue
+    value = (value << 5) | idx
+    bits += 5
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff)
+      bits -= 8
+    }
+  }
+  return new Uint8Array(bytes)
+}
+
+// HMAC-based OTP per RFC 6238. We implement TOTP-SHA1 with a 30-second
+// step and 6-digit codes, which is the de-facto default every authenticator
+// app speaks. Drift window of ±1 step is the standard 30s of clock slack.
+async function totpCode(secret, { step = 30, digits = 6, time = Math.floor(Date.now() / 1000) } = {}) {
+  const key = base32ToBytes(secret)
+  if (key.length === 0) return ''
+  const counter = Math.floor(time / step)
+  const counterBytes = new Uint8Array(8)
+  let value = counter
+  for (let i = 7; i >= 0; i -= 1) {
+    counterBytes[i] = value & 0xff
+    value = Math.floor(value / 256)
+  }
+  const cryptoKey = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign'])
+  const digest = new Uint8Array(await crypto.subtle.sign('HMAC', cryptoKey, counterBytes))
+  const offset = digest[digest.length - 1] & 0x0f
+  const binary = ((digest[offset] & 0x7f) << 24) | ((digest[offset + 1] & 0xff) << 16) | ((digest[offset + 2] & 0xff) << 8) | (digest[offset + 3] & 0xff)
+  const code = (binary % (10 ** digits)).toString().padStart(digits, '0')
+  return code
+}
+
+async function verifyTotp(secret, candidate) {
+  const trimmed = String(candidate || '').replace(/\s+/g, '')
+  if (!/^\d{6}$/.test(trimmed)) return false
+  const now = Math.floor(Date.now() / 1000)
+  // Accept the current step and the one on either side to absorb clock drift
+  // between the client and the server. ±1 step = ±30s.
+  for (const offset of [0, -1, 1]) {
+    const expected = await totpCode(secret, { time: now + offset * 30 })
+    if (expected && constantTimeEqual(expected, trimmed)) return true
+  }
+  return false
+}
+
+// Recovery codes are 10 single-use backup tokens. Stored as SHA-256 hashes
+// in D1 so a D1 leak alone doesn't grant access. On successful TOTP the
+// user can also spend a recovery code.
+async function generateRecoveryCodes(count = 10) {
+  const codes = []
+  for (let i = 0; i < count; i += 1) {
+    const bytes = crypto.getRandomValues(new Uint8Array(8))
+    const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+    codes.push(`${hex.slice(0, 4)}-${hex.slice(4, 8)}`)
+  }
+  return codes
+}
+async function hashRecoveryCodes(codes) {
+  const hashes = await Promise.all(codes.map((code) => sha256Hex(`recovery:${code.trim().toLowerCase()}`)))
+  return JSON.stringify(hashes)
+}
+async function consumeRecoveryCode(env, candidate) {
+  const normalized = String(candidate || '').trim().toLowerCase()
+  if (!/^[a-f0-9]{4}-[a-f0-9]{4}$/.test(normalized)) return false
+  const row = await env.DB.prepare('SELECT recovery_codes_hash FROM admin_totp WHERE id = 1').first()
+  if (!row) return false
+  let hashes
+  try { hashes = JSON.parse(row.recovery_codes_hash) } catch { return false }
+  const target = await sha256Hex(`recovery:${normalized}`)
+  const remaining = []
+  let matched = false
+  for (const h of hashes) {
+    if (!matched && constantTimeEqual(h, target)) matched = true
+    else remaining.push(h)
+  }
+  if (matched) {
+    await env.DB.prepare('UPDATE admin_totp SET recovery_codes_hash = ? WHERE id = 1').bind(JSON.stringify(remaining)).run()
+  }
+  return matched
+}
+
+// Admin audit log writer. Called from every /admin/* mutation handler so
+// the owner has a forensic record of who changed what, when, and from
+// where. Subject id and email come from the authenticated JWT, not from
+// any user-supplied field, so an attacker cannot forge their identity.
+async function writeAuditLog(env, request, user, action, { entityType = '', entityId = '', details = {} } = {}) {
+  if (!env.DB) return
+  try {
+    const ip = request.headers.get('CF-Connecting-IP') || ''
+    const now = nowIso()
+    await env.DB.prepare(`
+      INSERT INTO admin_audit_log (id, subject_id, subject_email, action, entity_type, entity_id, details, ip, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      makeId('audit'),
+      String(user?.id || ''),
+      String(user?.email || ''),
+      String(action || '').slice(0, 80),
+      String(entityType || '').slice(0, 40),
+      String(entityId || '').slice(0, 80),
+      JSON.stringify(details || {}).slice(0, 4000),
+      ip.slice(0, 64),
+      now,
+    ).run()
+  } catch (error) {
+    logEvent('warn', 'audit_log_write_failed', { error: error?.message })
+  }
+}
+
+async function getAdminAuditLog(env, { limit = 100, entityType = '', subjectId = '' } = {}) {
+  if (!env.DB) return []
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 100))
+  const where = []
+  const params = []
+  if (entityType) { where.push('entity_type = ?'); params.push(entityType) }
+  if (subjectId) { where.push('subject_id = ?'); params.push(subjectId) }
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  const result = await env.DB.prepare(`
+    SELECT id, subject_id AS subjectId, subject_email AS subjectEmail, action,
+           entity_type AS entityType, entity_id AS entityId, details, ip, created_at AS createdAt
+    FROM admin_audit_log
+    ${clause}
+    ORDER BY created_at DESC LIMIT ?
+  `).bind(...params, safeLimit).all()
+  return (result.results || []).map((row) => {
+    let parsedDetails = {}
+    try { parsedDetails = JSON.parse(row.details || '{}') } catch { /* ignore */ }
+    return { ...row, details: parsedDetails }
+  })
+}
+
 function getAllowedOrigins(env) {
   return String(env.APP_ORIGIN || '')
     .split(',')
@@ -180,6 +350,11 @@ async function readinessReport(env) {
     ['RATE_LIMIT_SALT', 'Rate-limit salt'],
     ['FEEDBACK_SIGNING_SECRET', 'Feedback signing secret'],
   ]
+  // SUPABASE_SERVICE_ROLE_KEY is recommended but not required: when
+  // missing, the webhook ownership re-check is skipped (logged as
+  // warning) and the HMAC signature remains the primary gate. Surface
+  // the gap as an advisory missing item so the owner knows to add it.
+  if (!env.SUPABASE_SERVICE_ROLE_KEY) missing.push({ name: 'SUPABASE_SERVICE_ROLE_KEY', label: 'Supabase service role key (recommended for webhook ownership re-check)' })
   required.push(['LEMONSQUEEZY_API_KEY', 'Lemon Squeezy API key'], ['LEMONSQUEEZY_WEBHOOK_SECRET', 'Lemon Squeezy webhook signing secret'])
   if (!settings.lemonSqueezyStoreId) missing.push({ name: 'lemonSqueezyStoreId', label: 'Lemon Squeezy store ID setting' })
   for (const [name, label] of required) {
@@ -1215,11 +1390,16 @@ async function authenticate(request, env) {
   await rateLimit(request, env, 'auth-gate', 300, 600)
   const token = bearerToken(request)
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) throw new HttpError(503, 'Authentication is not configured')
+  // 5s hard timeout on the Supabase round-trip. A slow auth provider must
+  // not be able to tie up a Worker request indefinitely; the request
+  // budget is 30s and a slow auth here is the single biggest cause of
+  // 30s-shaped tail latency.
   const response = await fetch(`${String(env.SUPABASE_URL).replace(/\/$/, '')}/auth/v1/user`, {
     headers: {
       Authorization: `Bearer ${token}`,
       apikey: env.SUPABASE_ANON_KEY,
     },
+    signal: AbortSignal.timeout(5000),
   })
   if (!response.ok) throw new HttpError(401, 'Your session is invalid or expired')
   const user = await response.json()
@@ -1233,9 +1413,51 @@ function userIsOwner(user, env) {
     || Boolean(ownerEmail && String(user?.email || '').toLowerCase() === ownerEmail)
 }
 
-async function requireOwner(request, env) {
+// Admin endpoint gate. Tiers:
+//   - GET requests: just the owner JWT.
+//   - Mutating requests (POST/PATCH/PUT/DELETE): owner JWT issued within
+//     the last 30 minutes, AND a valid TOTP code in X-Admin-TOTP, OR a
+//     valid recovery code in X-Admin-Recovery. The recency floor closes
+//     the window where a stolen long-lived JWT is enough on its own; the
+//     TOTP gate then makes a single factor (a leaked JWT) insufficient.
+const ADMIN_MUTATION_JWT_MAX_AGE_SECONDS = 30 * 60
+
+async function requireOwner(request, env, { mutation = false } = {}) {
   const user = await authenticate(request, env)
   if (!userIsOwner(user, env)) throw new HttpError(403, 'Owner access required')
+  if (!mutation) return user
+
+  // Recency check. The `iat` claim is seconds since epoch. We allow up to
+  // 5s clock skew so a near-fresh token is not rejected.
+  const iat = Number(user?.iat || 0)
+  const ageSeconds = iat ? Math.floor(Date.now() / 1000) - iat : Number.POSITIVE_INFINITY
+  if (!iat || ageSeconds > ADMIN_MUTATION_JWT_MAX_AGE_SECONDS + 5) {
+    logEvent('warn', 'admin_mutation_stale_jwt', { subjectId: user.id, ageSeconds })
+    throw new HttpError(401, 'Re-authenticate to make changes (admin session older than 30 minutes).')
+  }
+
+  // TOTP gate. The header may be absent if TOTP is not yet enrolled; in
+  // that case the first mutating request is allowed only if the row in
+  // admin_totp doesn't exist yet (i.e. the owner is enrolling for the
+  // first time). Once enrolled, the header is required on every mutation.
+  const existing = await env.DB.prepare('SELECT 1 AS one FROM admin_totp WHERE id = 1').first().catch(() => null)
+  if (!existing) return user
+
+  const totpCandidate = String(request.headers.get('X-Admin-TOTP') || '').trim()
+  const recoveryCandidate = String(request.headers.get('X-Admin-Recovery') || '').trim()
+  if (!totpCandidate && !recoveryCandidate) {
+    throw new HttpError(401, 'An admin authenticator code is required.')
+  }
+  const row = await env.DB.prepare('SELECT secret FROM admin_totp WHERE id = 1').first()
+  if (!row) throw new HttpError(503, 'Admin TOTP is partially configured')
+  let ok = false
+  if (totpCandidate && await verifyTotp(row.secret, totpCandidate)) ok = true
+  if (!ok && recoveryCandidate && await consumeRecoveryCode(env, recoveryCandidate)) ok = true
+  if (!ok) {
+    logEvent('warn', 'admin_mutation_totp_failed', { subjectId: user.id })
+    throw new HttpError(401, 'The admin authenticator code is incorrect or has already been used.')
+  }
+  await env.DB.prepare('UPDATE admin_totp SET last_used_at = ? WHERE id = 1').bind(nowIso()).run()
   return user
 }
 
@@ -1320,13 +1542,14 @@ async function lemonSqueezyRequest(env, path, { method = 'GET', body } = {}) {
         ...(body ? { 'Content-Type': 'application/vnd.api+json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(10000),
     })
   } catch {
     throw new HttpError(503, 'Lemon Squeezy could not be reached. Please try again.')
   }
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
-    console.error('Lemon Squeezy request failed', response.status)
+    logEvent('warn', 'lemon_squeezy_request_failed', { path, status: response.status })
     throw new HttpError(response.status >= 500 ? 502 : 400, 'The payment service could not complete the request')
   }
   return payload
@@ -1415,6 +1638,13 @@ async function createLemonSqueezyCheckout(env, user, items, settings, bundle = n
 
 async function createCheckoutSession(request, env, user) {
   await rateLimit(request, env, 'checkout', 8, 600, user.id)
+  // Per-email rate limit. The user-id limit above caps attempts by one
+  // account, but an attacker can mass-create Supabase accounts (or
+  // script a Google OAuth loop) to multiply the per-user budget by N.
+  // This bucket caps the *addressed* email instead, so 1,000 accounts
+  // all targeting attacker@evil.com hit the same wall.
+  const emailSubject = String(user?.email || '').trim().toLowerCase()
+  if (emailSubject) await rateLimit(request, env, 'checkout-email', 4, 86400, emailSubject)
   const body = await readJson(request)
   // Accept either a single productKey (legacy clients) or an array of
   // productKeys. Every item in the cart is validated here; the checkout
@@ -1512,6 +1742,17 @@ function constantTimeEqual(a, b) {
   return difference === 0
 }
 
+// Byte-array constant-time compare. Use this for HMAC verification
+// instead of comparing hex strings: the hex form leaks through length
+// differences and (on some platforms) per-byte work differences.
+function constantTimeEqualBytes(a, b) {
+  if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array)) return false
+  if (a.length !== b.length) return false
+  let difference = 0
+  for (let index = 0; index < a.length; index += 1) difference |= a[index] ^ b[index]
+  return difference === 0
+}
+
 function purchaseFromRow(row, productInfo = null) {
   const purchase = {
     id: row.id,
@@ -1547,8 +1788,78 @@ function escapeHtml(value) {
 // in code by emailLayout and sent as raw htmlContent, so template ids and
 // params are not involved). Sender selection is per message so each mail
 // type leaves from its own verified address.
+//
+// Quota handling: on 429 or 400-with-quota-message, the response's
+// `Retry-After` header (or a 1-hour fallback) is attached to the thrown
+// error as `.retryAfterSeconds`, and the same value is persisted to the
+// brevo_quota table so the cron worker can short-circuit known-exhausted
+// ticks instead of burning 5 attempts per row during a quota outage.
+class BrevoError extends Error {
+  constructor(message, { retryAfterSeconds = 0, isQuota = false, status = 0 } = {}) {
+    super(message)
+    this.name = 'BrevoError'
+    this.retryAfterSeconds = retryAfterSeconds
+    this.isQuota = isQuota
+    this.status = status
+  }
+}
+
+function parseBrevoQuotaResponse(text) {
+  // Brevo returns 400 with this body on the free-tier daily cap:
+  //   { "code": "forbidden_quota", "message": "Daily quota exceeded" }
+  // Paid tiers typically return 429 with a Retry-After header.
+  if (!text) return { isQuota: false, message: '' }
+  try {
+    const body = JSON.parse(text)
+    const code = String(body?.code || '').toLowerCase()
+    const message = String(body?.message || '')
+    const isQuota = code === 'forbidden_quota' || /quota|rate.?limit|too many/i.test(message)
+    return { isQuota, message: message || code }
+  } catch {
+    return { isQuota: false, message: text.slice(0, 200) }
+  }
+}
+
+function parseRetryAfter(headerValue) {
+  if (!headerValue) return 0
+  const asInt = Number.parseInt(headerValue, 10)
+  if (Number.isFinite(asInt) && asInt >= 0) return asInt
+  // RFC 7231 also allows an HTTP-date. Not common on SMTP APIs, but be safe.
+  const date = Date.parse(headerValue)
+  if (Number.isFinite(date)) return Math.max(0, Math.ceil((date - Date.now()) / 1000))
+  return 0
+}
+
+async function recordBrevoQuotaState(env, retryAfterSeconds, message) {
+  if (!env.DB) return
+  try {
+    const now = nowIso()
+    await env.DB.prepare(`
+      INSERT INTO brevo_quota (id, exhausted_at, retry_after_seconds, message, updated_at)
+      VALUES (1, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        exhausted_at = excluded.exhausted_at,
+        retry_after_seconds = excluded.retry_after_seconds,
+        message = excluded.message,
+        updated_at = excluded.updated_at
+    `).bind(now, retryAfterSeconds, String(message || '').slice(0, 500), now).run()
+  } catch (error) {
+    // Never let quota-state writes fail the parent operation.
+    console.error('Failed to persist Brevo quota state', redactPii(error?.message))
+  }
+}
+
+async function clearBrevoQuotaState(env) {
+  if (!env.DB) return
+  try {
+    await env.DB.prepare('DELETE FROM brevo_quota WHERE id = 1').run()
+  } catch {
+    // Best-effort.
+  }
+}
+
 async function sendBrevo(env, message) {
-  if (!env.BREVO_API_KEY || !message.from) throw new Error('Brevo is not configured')
+  if (!env.BREVO_API_KEY || !message.from) throw new BrevoError('Brevo is not configured')
   const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {
@@ -1562,13 +1873,29 @@ async function sendBrevo(env, message) {
       subject: message.subject,
       htmlContent: message.html,
       textContent: message.text,
-      ...(message.idempotencyKey ? { headers: { 'X-Runway-Idempotency-Key': message.idempotencyKey } } : {}),
+      ...(message.idempotencyKey ? { headers: { 'X-Request-Id': message.idempotencyKey } } : {}),
     }),
   })
-  if (!response.ok) {
-    console.error('Brevo request failed', response.status)
-    throw new Error(`Brevo returned ${response.status}`)
+  if (response.ok) {
+    // Any successful send proves the cap has lifted. Drop the recorded
+    // exhausted state so the next cron tick doesn't short-circuit.
+    await clearBrevoQuotaState(env)
+    return
   }
+  const text = await response.text().catch(() => '')
+  const { isQuota, message: detailMessage } = parseBrevoQuotaResponse(text)
+  const headerRetry = parseRetryAfter(response.headers.get('Retry-After'))
+  // If Brevo signals a quota problem but doesn't give a Retry-After, fall
+  // back to a 1-hour cooldown. That is the smallest cooldown that won't
+  // keep hammering the API every 5 minutes during a free-tier reset.
+  const retryAfterSeconds = headerRetry || (isQuota ? 3600 : 0)
+  if (isQuota) await recordBrevoQuotaState(env, retryAfterSeconds, detailMessage || `Brevo returned ${response.status}`)
+  console.error('Brevo request failed', response.status, isQuota ? 'quota' : 'other')
+  throw new BrevoError(`Brevo returned ${response.status}`, {
+    retryAfterSeconds,
+    isQuota,
+    status: response.status,
+  })
 }
 
 function emailLayout(title, intro, actionLabel, actionUrl, footer, secondaryAction = null, eyebrow = 'RUNWAY SYSTEMS') {
@@ -1622,8 +1949,9 @@ async function deliverPurchaseEmail(env, purchase) {
     WHERE id = ?
       AND delivery_email_attempts < 5
       AND (delivery_email_status IN ('pending', 'failed') OR (delivery_email_status = 'sending' AND updated_at <= ?))
+      AND (delivery_email_next_eligible_at = '' OR delivery_email_next_eligible_at <= ?)
     RETURNING *
-  `).bind(claimedAt, purchase.id, staleBefore).first()
+  `).bind(claimedAt, purchase.id, staleBefore, claimedAt).first()
 
   if (!claimed) return false
 
@@ -1633,17 +1961,38 @@ async function deliverPurchaseEmail(env, purchase) {
     await env.DB.prepare(`
       UPDATE purchases
       SET delivery_email_status = 'sent', delivery_email_sent_at = ?,
-          delivery_email_last_error = NULL, updated_at = ?
+          delivery_email_last_error = NULL, updated_at = ?,
+          delivery_email_next_eligible_at = ''
       WHERE id = ? AND delivery_email_status = 'sending'
     `).bind(nowIso(), nowIso(), purchase.id).run()
     return true
   } catch (error) {
+    const errorText = redactPii(String(error.message || error)).slice(0, 500)
+    // A Retry-After hint from Brevo is stamped onto the per-row cooldown
+    // column so the same row isn't picked up again before the cooldown
+    // ends. We round up to a minute so we never schedule a retry exactly
+    // at the wall-clock instant the cooldown expires (sub-minute precision
+    // would race the cron tick).
+    const cooldownSeconds = Math.max(60, Number(error.retryAfterSeconds) || 0)
+    const cooldownIso = new Date(Date.now() + cooldownSeconds * 1000).toISOString()
     await env.DB.prepare(`
       UPDATE purchases
-      SET delivery_email_status = 'failed', delivery_email_last_error = ?, updated_at = ?
+      SET delivery_email_status = 'failed', delivery_email_last_error = ?,
+          updated_at = ?, delivery_email_next_eligible_at = ?
       WHERE id = ? AND delivery_email_status = 'sending'
-    `).bind(String(error.message || error).slice(0, 500), nowIso(), purchase.id).run()
-    console.error('Delivery email failed', purchase.id, redactPii(error?.message))
+    `).bind(errorText, cooldownIso, cooldownIso, purchase.id).run()
+    console.error('Delivery email failed', purchase.id, redactPii(error.message))
+    // Loud permanent-failure log so a stuck row shows up in Cloudflare
+    // log search. The 5-attempt cap is hard-coded in the SQL above; the
+    // matching .attempts === 5 here means no more retries will fire.
+    if (Number(claimed.delivery_email_attempts) >= 5) {
+      console.error('Delivery email permanently failed after max attempts', {
+        purchaseId: purchase.id,
+        attempts: claimed.delivery_email_attempts,
+        lastError: redactPii(errorText),
+        isQuota: Boolean(error.isQuota),
+      })
+    }
     return false
   }
 }
@@ -1678,14 +2027,32 @@ async function sendReviewEmail(env, request, settings) {
 }
 
 async function processEmailQueues(env) {
+  // Short-circuit when Brevo's daily cap has been hit and the cooldown
+  // recorded on a previous failed send is still in force. Saves burning
+  // 5 attempts per row across a backlog during a free-tier reset.
+  if (env.DB) {
+    const quota = await env.DB.prepare('SELECT exhausted_at, retry_after_seconds FROM brevo_quota WHERE id = 1').first().catch(() => null)
+    if (quota?.exhausted_at) {
+      const elapsed = (Date.now() - new Date(quota.exhausted_at).getTime()) / 1000
+      if (elapsed < Number(quota.retry_after_seconds || 0)) {
+        const wait = Math.ceil(Number(quota.retry_after_seconds) - elapsed)
+        console.warn('Brevo quota cooldown active, skipping email tick', { retryInSeconds: wait })
+        await env.DB.prepare('DELETE FROM rate_limits WHERE expires_at < ?').bind(nowIso()).run()
+        return
+      }
+    }
+  }
+
   const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+  const now = nowIso()
   const pendingDeliveries = await env.DB.prepare(`
     SELECT * FROM purchases
     WHERE payment_status = 'paid'
       AND (delivery_email_status IN ('pending', 'failed') OR (delivery_email_status = 'sending' AND updated_at <= ?))
       AND delivery_email_attempts < 5
+      AND (delivery_email_next_eligible_at = '' OR delivery_email_next_eligible_at <= ?)
     ORDER BY created_at ASC LIMIT 20
-  `).bind(staleBefore).all()
+  `).bind(staleBefore, now).all()
   for (const purchase of pendingDeliveries.results || []) await deliverPurchaseEmail(env, purchase)
 
   const settings = await getSettings(env)
@@ -1693,8 +2060,9 @@ async function processEmailQueues(env) {
     SELECT * FROM review_requests
     WHERE (status IN ('pending', 'failed') OR (status = 'sending' AND updated_at <= ?))
       AND attempts < 5 AND send_at <= ?
+      AND (next_eligible_at = '' OR next_eligible_at <= ?)
     ORDER BY send_at ASC LIMIT 20
-  `).bind(staleBefore, nowIso()).all()
+  `).bind(staleBefore, nowIso(), now).all()
   for (const request of dueReviews.results || []) {
     const claimedAt = nowIso()
     const feedbackExpiresAt = new Date(Date.now() + FEEDBACK_TOKEN_TTL_SECONDS * 1000).toISOString()
@@ -1704,24 +2072,37 @@ async function processEmailQueues(env) {
           last_error = NULL, updated_at = ?
       WHERE id = ? AND attempts < 5
         AND (status IN ('pending', 'failed') OR (status = 'sending' AND updated_at <= ?))
+        AND (next_eligible_at = '' OR next_eligible_at <= ?)
         AND EXISTS (SELECT 1 FROM purchases WHERE purchases.id = review_requests.purchase_id AND purchases.payment_status = 'paid')
       RETURNING *
-    `).bind(feedbackExpiresAt, claimedAt, request.id, staleBefore).first()
+    `).bind(feedbackExpiresAt, claimedAt, request.id, staleBefore, claimedAt).first()
     if (!claimed) continue
 
     try {
       await sendReviewEmail(env, claimed, settings)
       await env.DB.prepare(`
         UPDATE review_requests
-        SET status = 'sent', sent_at = ?, last_error = NULL, updated_at = ?
+        SET status = 'sent', sent_at = ?, last_error = NULL, updated_at = ?, next_eligible_at = ''
         WHERE id = ? AND status = 'sending'
       `).bind(nowIso(), nowIso(), request.id).run()
     } catch (error) {
+      const errorText = redactPii(String(error.message || error)).slice(0, 500)
+      const cooldownSeconds = Math.max(60, Number(error.retryAfterSeconds) || 0)
+      const cooldownIso = new Date(Date.now() + cooldownSeconds * 1000).toISOString()
       await env.DB.prepare(`
-        UPDATE review_requests SET status = 'failed', last_error = ?, updated_at = ?
+        UPDATE review_requests SET status = 'failed', last_error = ?, updated_at = ?, next_eligible_at = ?
         WHERE id = ? AND status = 'sending'
-      `).bind(String(error.message || error).slice(0, 500), nowIso(), request.id).run()
+      `).bind(errorText, cooldownIso, cooldownIso, request.id).run()
       console.error('Review email failed', request.id, redactPii(error?.message))
+      if (Number(claimed.attempts) >= 5) {
+        console.error('Review email permanently failed after max attempts', {
+          reviewRequestId: request.id,
+          purchaseId: claimed.purchase_id,
+          attempts: claimed.attempts,
+          lastError: redactPii(errorText),
+          isQuota: Boolean(error.isQuota),
+        })
+      }
     }
   }
 
@@ -1780,10 +2161,10 @@ async function recordLemonOrder(env, data, eventKey, eventName) {
         id, order_identifier, user_id, customer_email, customer_name,
         variant_id, amount_total, currency, payment_status, product_key,
         delivery_email_status, delivery_email_attempts, created_at, updated_at,
-        consent_at, consent_policy_version
+        consent_at, consent_policy_version, delivery_email_next_eligible_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?,
         CASE WHEN EXISTS (SELECT 1 FROM revoked_orders WHERE order_identifier = ?) THEN 'refunded' ELSE 'paid' END,
-        ?, 'pending', 0, ?, ?, ?, ?)
+        ?, 'pending', 0, ?, ?, ?, ?, '')
       ON CONFLICT(order_identifier, product_key) DO UPDATE SET
         user_id = excluded.user_id,
         customer_email = excluded.customer_email,
@@ -1815,9 +2196,9 @@ async function recordLemonOrder(env, data, eventKey, eventName) {
     ))
     statements.push(env.DB.prepare(`
       INSERT INTO review_requests (
-        id, purchase_id, user_id, email, customer_name, send_at, status, attempts, created_at, updated_at
+        id, purchase_id, user_id, email, customer_name, send_at, status, attempts, created_at, updated_at, next_eligible_at
       )
-      SELECT ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?
+      SELECT ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ''
       WHERE EXISTS (SELECT 1 FROM purchases WHERE id = ? AND payment_status = 'paid')
       ON CONFLICT(purchase_id) DO NOTHING
     `).bind(makeId('review_request'), purchaseId, userId, email, String(attributes.user_name || ''), reviewSendAt, updatedAt, updatedAt, purchaseId))
@@ -1855,8 +2236,15 @@ async function handleLemonSqueezyWebhook(request, env, ctx) {
   const signature = String(request.headers.get('X-Signature') || '').toLowerCase()
   if (!signature || !/^[a-f0-9]{64}$/.test(signature)) throw new HttpError(400, 'Invalid Lemon Squeezy signature')
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.LEMONSQUEEZY_WEBHOOK_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
-  const expected = [...new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(rawBody)))].map((byte) => byte.toString(16).padStart(2, '0')).join('')
-  if (!constantTimeEqual(signature, expected)) throw new HttpError(400, 'Invalid Lemon Squeezy signature')
+  // Compare the raw byte arrays instead of their hex strings. Hex-string
+  // comparison leaks through differences in length and per-byte CPU cost;
+  // comparing the 32 raw bytes leaks far less. An attacker who can time
+  // individual Worker invocations to microsecond precision still has a
+  // hard problem, but this is the standard recommendation.
+  const expectedBytes = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(rawBody)))
+  const suppliedBytes = new Uint8Array(32)
+  for (let i = 0; i < 32; i += 1) suppliedBytes[i] = parseInt(signature.slice(i * 2, i * 2 + 2), 16)
+  if (!constantTimeEqualBytes(suppliedBytes, expectedBytes)) throw new HttpError(400, 'Invalid Lemon Squeezy signature')
 
   let event
   try {
@@ -1871,6 +2259,43 @@ async function handleLemonSqueezyWebhook(request, env, ctx) {
   if (processed) return json(request, env, { received: true, duplicate: true })
 
   if (eventName === 'order_created') {
+    // Re-verify the custom.user_id against Supabase before honouring the
+    // webhook. The custom field is set by us during checkout, but a
+    // belt-and-suspenders check stops a forged webhook from granting a
+    // purchase to a user id that was never authenticated. This check
+    // requires SUPABASE_SERVICE_ROLE_KEY (a server-side admin key).
+    // When the key is absent, we log a warning and continue; the
+    // HMAC verification above is the primary defence.
+    if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) {
+      const expectedUserId = String(event?.data?.attributes?.custom?.user_id || '').trim()
+      const expectedEmail = String(event?.data?.attributes?.user_email || '').trim().toLowerCase()
+      if (expectedUserId) {
+        try {
+          const lookup = await fetch(`${String(env.SUPABASE_URL).replace(/\/$/, '')}/auth/v1/admin/users/${encodeURIComponent(expectedUserId)}`, {
+            headers: {
+              apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+              Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+            },
+            signal: AbortSignal.timeout(4000),
+          })
+          if (!lookup.ok) {
+            logEvent('warn', 'webhook_user_lookup_failed', { status: lookup.status, userId: expectedUserId })
+            throw new HttpError(400, 'Supabase rejected the custom user id')
+          }
+          const u = await lookup.json().catch(() => ({}))
+          const userEmail = String(u?.email || '').trim().toLowerCase()
+          if (userEmail && expectedEmail && userEmail !== expectedEmail) {
+            logEvent('warn', 'webhook_email_mismatch', { userId: expectedUserId })
+            throw new HttpError(400, 'Webhook ownership metadata does not match Supabase user')
+          }
+        } catch (error) {
+          if (error instanceof HttpError) throw error
+          logEvent('warn', 'webhook_user_lookup_error', { error: error?.message })
+        }
+      }
+    } else {
+      logEvent('warn', 'webhook_ownership_check_skipped', { reason: 'SUPABASE_SERVICE_ROLE_KEY not set' })
+    }
     const purchases = await recordLemonOrder(env, event.data, eventKey, eventName)
     for (const purchase of purchases) {
       if (purchase.payment_status === 'paid') ctx.waitUntil(deliverPurchaseEmail(env, purchase))
@@ -2045,7 +2470,7 @@ async function getIntegrationStatus(env) {
     { id: 'lemonsqueezy', label: 'Lemon Squeezy', status: env.LEMONSQUEEZY_API_KEY && env.LEMONSQUEEZY_WEBHOOK_SECRET ? 'connected' : 'setup', detail: 'Merchant of record: Lemon Squeezy handles global sales tax and remittance for your orders' },
     { id: 'supabase', label: 'Supabase', status: env.SUPABASE_URL && env.SUPABASE_ANON_KEY ? 'connected' : 'setup', detail: 'Google OAuth and account verification' },
     { id: 'email', label: 'Brevo', status: env.BREVO_API_KEY && env.EMAIL_FROM_DELIVERY && env.EMAIL_FROM_INFO ? 'connected' : 'setup', detail: 'Delivery and neutral review invitations' },
-    { id: 'trustpilot', label: 'Trustpilot', status: env.TRUSTPILOT_REVIEW_URL ? 'connected' : 'setup', detail: 'Neutral invitation for every verified buyer' },
+    { id: 'trustpilot', label: 'Trustpilot', status: env.TRUSTPILOT_REVIEW_URL ? 'connected' : 'setup', detail: 'Neutral review invitation for every verified buyer (no on-site widget)' },
     { id: 'ai', label: 'AI image scanning', status: aiMode ? 'connected' : 'setup', detail: aiMode === 'binding' ? 'Workers AI binding analyzes uploaded screenshots and writes feature copy' : aiMode === 'rest' ? 'Workers AI REST access writes feature headings and subheadings' : 'Add the AI binding or AI_ACCOUNT_ID and AI_API_TOKEN for auto-written feature copy' },
   ]
 }
@@ -2130,6 +2555,30 @@ async function handleRequest(request, env, ctx) {
     const product = await resolveProductConfig(env, purchase.product_key)
     return json(request, env, { url: productDeliveryUrl(env, product) }, 200, { 'Cache-Control': 'no-store' })
   }
+  match = routeMatch(path, /^\/account\/purchases\/([^/]+)\/resend-delivery$/)
+  if (match && request.method === 'POST') {
+    const user = await authenticate(request, env)
+    await rateLimit(request, env, 'delivery', 20, 3600, user.id)
+    const purchaseId = decodeURIComponent(match[1])
+    const purchase = await findPurchaseForUser(env, purchaseId, user.id)
+    // Reset the attempt counter and any pending cooldown so the next cron
+    // tick (or the eager send below) actually picks the row up. The buyer
+    // shouldn't have to wait for the system to age out a failed row.
+    const reset = await env.DB.prepare(`
+      UPDATE purchases
+      SET delivery_email_status = 'pending',
+          delivery_email_attempts = 0,
+          delivery_email_next_eligible_at = '',
+          delivery_email_last_error = NULL,
+          updated_at = ?
+      WHERE id = ? AND user_id = ? AND payment_status = 'paid'
+      RETURNING *
+    `).bind(nowIso(), purchase.id, user.id).first()
+    if (!reset) throw new HttpError(404, 'Purchase not found for this account')
+    ctx.waitUntil(deliverPurchaseEmail(env, reset))
+    const productInfo = await productInfoMap(env)
+    return json(request, env, { ...purchaseFromRow(reset, productInfo), resendQueued: true }, 200, { 'Cache-Control': 'no-store' })
+  }
   match = routeMatch(path, /^\/account\/purchases\/([^/]+)\/feedback-link$/)
   if (match && request.method === 'POST') {
     const user = await authenticate(request, env)
@@ -2176,7 +2625,8 @@ async function handleRequest(request, env, ctx) {
   }
 
   if (path.startsWith('/admin/')) {
-    const ownerUser = await requireOwner(request, env)
+    const isMutation = request.method !== 'GET' && request.method !== 'HEAD' && request.method !== 'OPTIONS'
+    const ownerUser = await requireOwner(request, env, { mutation: isMutation })
     if (path === '/admin/products' && request.method === 'GET') {
       await ensureProductsSeeded(env)
       const result = await env.DB.prepare('SELECT * FROM products ORDER BY sort_order ASC, key ASC').all()
@@ -2189,31 +2639,50 @@ async function handleRequest(request, env, ctx) {
       // An optional duplicateFrom copies an existing product's content into the
       // new key; without it this is an ordinary create.
       const source = cleanText(String(body.duplicateFrom || ''), 60, 'Source product key', { required: false })
+      let created
       if (source) {
-        return json(request, env, await duplicateProduct(env, source, body), 201, { 'Cache-Control': 'no-store' })
+        created = await duplicateProduct(env, source, body)
+      } else {
+        created = await createProduct(env, body)
       }
-      return json(request, env, await createProduct(env, body), 201, { 'Cache-Control': 'no-store' })
+      await writeAuditLog(env, request, ownerUser, source ? 'product.duplicate' : 'product.create', { entityType: 'product', entityId: created.key, details: { name: created.name, source: source || '' } })
+      return json(request, env, created, 201, { 'Cache-Control': 'no-store' })
     }
     if (path === '/admin/bundles' && request.method === 'GET') {
       const result = await env.DB.prepare('SELECT * FROM bundles ORDER BY sort_order ASC, key ASC').all()
       return json(request, env, (result.results || []).map(bundleRowToConfig), 200, { 'Cache-Control': 'no-store' })
     }
     if (path === '/admin/bundles' && request.method === 'POST') {
-      return json(request, env, await createBundle(env, await readJson(request)), 201, { 'Cache-Control': 'no-store' })
+      const created = await createBundle(env, await readJson(request))
+      await writeAuditLog(env, request, ownerUser, 'bundle.create', { entityType: 'bundle', entityId: created.key, details: { name: created.name } })
+      return json(request, env, created, 201, { 'Cache-Control': 'no-store' })
     }
     match = routeMatch(path, /^\/admin\/bundles\/([^/]+)$/)
     if (match && request.method === 'PATCH') {
-      return json(request, env, await updateBundle(env, decodeURIComponent(match[1]), await readJson(request)), 200, { 'Cache-Control': 'no-store' })
+      const key = decodeURIComponent(match[1])
+      const before = await env.DB.prepare('SELECT * FROM bundles WHERE key = ?').bind(key).first()
+      const updated = await updateBundle(env, key, await readJson(request))
+      await writeAuditLog(env, request, ownerUser, 'bundle.update', { entityType: 'bundle', entityId: key, details: { changed: Object.keys(updated || {}), before: before ? { name: before.name, discount: before.discount_percent } : null } })
+      return json(request, env, updated, 200, { 'Cache-Control': 'no-store' })
     }
     if (match && request.method === 'DELETE') {
-      return json(request, env, await deleteBundle(env, decodeURIComponent(match[1])), 200, { 'Cache-Control': 'no-store' })
+      const key = decodeURIComponent(match[1])
+      const result = await deleteBundle(env, key)
+      await writeAuditLog(env, request, ownerUser, 'bundle.delete', { entityType: 'bundle', entityId: key, details: { name: result.name } })
+      return json(request, env, result, 200, { 'Cache-Control': 'no-store' })
     }
     match = routeMatch(path, /^\/admin\/products\/([^/]+)$/)
     if (match && request.method === 'PATCH') {
-      return json(request, env, await updateProduct(env, decodeURIComponent(match[1]), await readJson(request)), 200, { 'Cache-Control': 'no-store' })
+      const key = decodeURIComponent(match[1])
+      const updated = await updateProduct(env, key, await readJson(request))
+      await writeAuditLog(env, request, ownerUser, 'product.update', { entityType: 'product', entityId: key, details: { name: updated.name, salePrice: updated.salePrice } })
+      return json(request, env, updated, 200, { 'Cache-Control': 'no-store' })
     }
     if (match && request.method === 'DELETE') {
-      return json(request, env, await deleteProduct(env, decodeURIComponent(match[1])), 200, { 'Cache-Control': 'no-store' })
+      const key = decodeURIComponent(match[1])
+      const result = await deleteProduct(env, key)
+      await writeAuditLog(env, request, ownerUser, 'product.delete', { entityType: 'product', entityId: key, details: { name: result.name } })
+      return json(request, env, result, 200, { 'Cache-Control': 'no-store' })
     }
     match = routeMatch(path, /^\/admin\/products\/([^/]+)\/upload$/)
     if (match && request.method === 'POST') {
@@ -2344,12 +2813,77 @@ async function handleRequest(request, env, ctx) {
       `).bind(body.status, moderatedAt, decodeURIComponent(match[1])).first()
       if (!result) throw new HttpError(404, 'Testimonial not found')
       await invalidatePublicCaches()
+      await writeAuditLog(env, request, ownerUser, 'testimonial.moderate', { entityType: 'testimonial', entityId: decodeURIComponent(match[1]), details: { status: body.status } })
       return json(request, env, result, 200, { 'Cache-Control': 'no-store' })
     }
     if (path === '/admin/analytics' && request.method === 'GET') return json(request, env, await getAnalytics(env), 200, { 'Cache-Control': 'no-store' })
     if (path === '/admin/settings' && request.method === 'GET') return json(request, env, await getSettings(env), 200, { 'Cache-Control': 'no-store' })
-    if (path === '/admin/settings' && request.method === 'PUT') return json(request, env, await saveSettings(env, await readJson(request)), 200, { 'Cache-Control': 'no-store' })
+    if (path === '/admin/settings' && request.method === 'PUT') {
+      const before = await getSettings(env)
+      const result = await saveSettings(env, await readJson(request))
+      await writeAuditLog(env, request, ownerUser, 'settings.update', { entityType: 'settings', entityId: 'site', details: { changed: Object.keys(result) } })
+      return json(request, env, result, 200, { 'Cache-Control': 'no-store' })
+    }
     if (path === '/admin/integrations/status' && request.method === 'GET') return json(request, env, await getIntegrationStatus(env), 200, { 'Cache-Control': 'no-store' })
+
+    // TOTP enrolment. The first response returns the secret and recovery
+    // codes (so the owner can scan/print them). The second request confirms
+    // enrolment by sending a valid code from the authenticator app; only
+    // then do we flip the row to "verified". Until verified, mutations are
+    // still permitted (the owner is enrolling for the first time).
+    if (path === '/admin/totp/enrol' && request.method === 'POST') {
+      const existing = await env.DB.prepare('SELECT 1 AS one, verified_at FROM admin_totp WHERE id = 1').first()
+      if (existing?.one && existing.verified_at) {
+        throw new HttpError(409, 'Two-factor authentication is already enrolled. Reset from the admin dashboard to re-enrol.')
+      }
+      const secretBytes = crypto.getRandomValues(new Uint8Array(20))
+      const secret = bytesToBase32(secretBytes)
+      const recoveryCodes = await generateRecoveryCodes(10)
+      const recoveryHashes = await hashRecoveryCodes(recoveryCodes)
+      const now = nowIso()
+      await env.DB.prepare(`
+        INSERT INTO admin_totp (id, secret, enrolled_at, recovery_codes_hash)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET secret = excluded.secret, enrolled_at = excluded.enrolled_at,
+          recovery_codes_hash = excluded.recovery_codes_hash, verified_at = NULL, last_used_at = NULL
+      `).bind(secret, now, recoveryHashes).run()
+      await writeAuditLog(env, request, ownerUser, 'totp.enrol_start', { entityType: 'admin_totp', entityId: '1' })
+      return json(request, env, {
+        secret,
+        otpauthUrl: `otpauth://totp/Runway%20Systems%20Admin?secret=${secret}&issuer=Runway%20Systems&algorithm=SHA1&digits=6&period=30`,
+        recoveryCodes,
+      }, 201, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/totp/verify' && request.method === 'POST') {
+      const body = await readJson(request)
+      const candidate = cleanText(body.code, 10, 'TOTP code')
+      const row = await env.DB.prepare('SELECT secret FROM admin_totp WHERE id = 1').first()
+      if (!row) throw new HttpError(409, 'Two-factor authentication has not been enrolled yet.')
+      const ok = await verifyTotp(row.secret, candidate)
+      if (!ok) {
+        await writeAuditLog(env, request, ownerUser, 'totp.verify_failed', { entityType: 'admin_totp', entityId: '1' })
+        throw new HttpError(401, 'The code is incorrect.')
+      }
+      await env.DB.prepare('UPDATE admin_totp SET verified_at = ? WHERE id = 1').bind(nowIso()).run()
+      await writeAuditLog(env, request, ownerUser, 'totp.verify_ok', { entityType: 'admin_totp', entityId: '1' })
+      return json(request, env, { verified: true }, 200, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/totp/status' && request.method === 'GET') {
+      const row = await env.DB.prepare('SELECT enrolled_at, verified_at, last_used_at FROM admin_totp WHERE id = 1').first()
+      return json(request, env, { enrolled: Boolean(row), enrolledAt: row?.enrolled_at || '', verified: Boolean(row?.verified_at), lastUsedAt: row?.last_used_at || '' }, 200, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/totp/reset' && request.method === 'POST') {
+      await env.DB.prepare('DELETE FROM admin_totp WHERE id = 1').run()
+      await writeAuditLog(env, request, ownerUser, 'totp.reset', { entityType: 'admin_totp', entityId: '1' })
+      return json(request, env, { reset: true }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (path === '/admin/audit-log' && request.method === 'GET') {
+      const limit = Number(url.searchParams.get('limit') || 100)
+      const entityType = cleanText(url.searchParams.get('entityType') || '', 40, 'entityType', { required: false })
+      const subjectId = cleanText(url.searchParams.get('subjectId') || '', 80, 'subjectId', { required: false })
+      return json(request, env, await getAdminAuditLog(env, { limit, entityType, subjectId }), 200, { 'Cache-Control': 'no-store' })
+    }
   }
 
   throw new HttpError(404, 'Endpoint not found')

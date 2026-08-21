@@ -930,7 +930,7 @@ export const SUITE_DEFAULTS = {
     stats: [['4', 'connected products'], ['100%', 'inside your Drive'], ['0', 'monthly fees'], ['1', 'calm place to run things']],
   },
   consent: {
-    description: 'Essential storage keeps your cart, theme, and sign-in working. Optional content such as the Trustpilot widget loads only if you accept.',
+    description: 'Essential storage keeps your cart, theme, and sign-in working. No optional third-party content is loaded on this site.',
   },
 }
 

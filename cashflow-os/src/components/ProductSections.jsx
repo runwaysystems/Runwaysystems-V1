@@ -42,7 +42,6 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import TrustpilotBox from './TrustpilotBox'
 import ProductMockVisual from './ProductMockVisual'
 
 const cx = (...classes) => classes.filter(Boolean).join(' ')
@@ -752,7 +751,6 @@ export function ProductPricing({ product, onBuy, offer, onToggleCart, inCart }) 
           <p className="secure-note">
             <LockKeyhole /> Secure checkout powered by Lemon Squeezy · Tax handled as the merchant of record
           </p>
-          <TrustpilotBox />
           <div className="price-footer"><span><b>{pricing.license}</b>{pricing.licenseBody}</span></div>
         </article>
       </div>

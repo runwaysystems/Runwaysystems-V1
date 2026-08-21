@@ -81,10 +81,16 @@ export function AuthProvider({ children }) {
     }
 
     setAuthPending(true)
+    // Use a fixed, origin-only redirect target. Never echo the full
+    // window.location.href: a victim who lands on
+    // /anything?next=https://evil.com should not have the OAuth callback
+    // honour that query, and Supabase's own allowlist is the
+    // primary defence, not an excuse to forward user input.
+    const safeRedirect = `${window.location.origin}/account`
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: window.location.href,
+        redirectTo: safeRedirect,
         queryParams: {
           access_type: 'offline',
           prompt: 'select_account',
