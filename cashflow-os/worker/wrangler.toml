@@ -4,24 +4,30 @@ compatibility_date = "2026-08-13"
 
 # Public, non-secret Worker configuration. Replace placeholders before deploy.
 [vars]
-APP_ORIGIN = "https://your-domain.com"
-SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
-OWNER_EMAIL = "owner@your-domain.com"
-TRUSTPILOT_REVIEW_URL = "https://www.trustpilot.com/review/your-domain.com"
-EMAIL_FROM_DELIVERY = "delivery@your-domain.com"
-EMAIL_FROM_INFO = "info@your-domain.com"
-SUPPORT_EMAIL = "support@your-domain.com"
+APP_ORIGIN = "https://runwaysystems.cloud,https://www.runwaysystems.cloud"
+SUPABASE_URL = "https://ythpgppbceftyltwsgjs.supabase.co"
+OWNER_EMAIL = "runwaysystems.cloud@gmail.com"
+TRUSTPILOT_REVIEW_URL = "https://www.trustpilot.com/review/runwaysystems.cloud"
+EMAIL_FROM_DELIVERY = "delivery@runwaysystems.cloud"
+EMAIL_FROM_INFO = "info@runwaysystems.cloud"
+SUPPORT_EMAIL = "support@runwaysystems.cloud"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "cashflow-os-platform"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "6b36862a-3c36-44df-a46f-95ff89226f23"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
 binding = "MEDIA"
 bucket_name = "runway-product-media"
 
+[ai]
+binding = "AI"
+
+[observability]
+enabled = true
+traces = { enabled = true }
 # Optional AI image scanning for feature headings uses the Workers AI REST API
 # via the AI_ACCOUNT_ID and AI_API_TOKEN secrets (see README), or a manually
 # added "AI" Workers AI binding. Neither is required: without them, owners
