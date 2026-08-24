@@ -4,12 +4,13 @@
 // later through the admin panel are covered by the dynamic sitemap served by
 // the Worker at /sitemap.xml - see DEPLOYMENT.md for the one-line Pages
 // proxy that keeps everything on the same hostname.
-import { writeFile } from 'node:fs/promises'
+import { writeFile, mkdir } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { CATALOG } from '../src/data/catalog.js'
 
-const SITE_URL = String(process.env.SITE_URL || 'https://runway-systems.pages.dev').replace(/\/$/, '')
+const SITE_URL = String(process.env.SITE_URL || 'https://runwaysystems.cloud').replace(/\/$/, '')
 if (!process.env.SITE_URL) {
-  console.warn(`[seo] SITE_URL not set; using ${SITE_URL}. Set SITE_URL to your production domain when building for deployment.`)
+  console.warn(`[seo] SITE_URL not set; using default ${SITE_URL}. Override with SITE_URL to target a different (e.g. staging) domain.`)
 }
 
 const today = new Date().toISOString().slice(0, 10)
@@ -64,6 +65,7 @@ const robots = [
   '',
 ].join('\n')
 
+await mkdir(dirname('dist/sitemap.xml'), { recursive: true })
 await writeFile('dist/sitemap.xml', xml)
 await writeFile('dist/robots.txt', robots)
 console.log(`[seo] dist/sitemap.xml (${urls.length} urls) and dist/robots.txt written for ${SITE_URL}`)
