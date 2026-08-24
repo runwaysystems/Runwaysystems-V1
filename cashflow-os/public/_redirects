@@ -1,7 +1,8 @@
 /* /index.html 200
 
 # Dynamic sitemap: products created later in the admin panel appear in the
-# Worker's /sitemap.xml automatically. Proxy it onto this hostname by
-# replacing the URL with your deployed Worker domain and uncommenting:
-# /sitemap.xml https://YOUR_WORKER_SUBDOMAIN.workers.dev/sitemap.xml 200
+# Worker's /sitemap.xml automatically (it reads the D1 products table).
+# This proxies /sitemap.xml on this hostname to the Worker so crawlers see
+# every active product without a rebuild.
+/sitemap.xml https://cashflow-os-platform.runwaysystems-cloud.workers.dev/sitemap.xml 200
 
