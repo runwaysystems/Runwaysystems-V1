@@ -5,6 +5,7 @@ import { API_BASE_URL } from '../api/platformApi'
 import { usePublicProducts } from '../hooks/usePublicProducts'
 import { isPreviewRequest, usePreviewDraft } from '../hooks/usePreviewDraft'
 import { productIsUnavailable, storefrontProducts } from '../lib/catalogAvailability'
+import { DEFAULT_OG_IMAGE_PATH, resolveSeoUrl } from '../lib/seo'
 import { useSecureCheckout } from '../hooks/useSecureCheckout'
 import { usePageAnimations } from '../hooks/usePageAnimations'
 import { useCart } from '../context/CartContext'
@@ -87,7 +88,7 @@ export default function ProductPage({ theme, onToggleTheme, palette, onPaletteCh
           name: product.name,
           description: seoDescription,
           brand: { '@type': 'Brand', name: 'Runway Systems' },
-          image: `${window.location.origin}${product.hero?.visual?.screen?.src || '/product-dashboard-uhd.webp'}`,
+          image: resolveSeoUrl(product.hero?.visual?.screen?.src || DEFAULT_OG_IMAGE_PATH),
           offers: {
             '@type': 'Offer',
             url: `${window.location.origin}${canonicalPath}`,
@@ -177,7 +178,8 @@ export default function ProductPage({ theme, onToggleTheme, palette, onPaletteCh
         description={seoDescription}
         canonicalPath={`/products/${productKey}`}
         ogType="product"
-        ogImage={`${window.location.origin}${product.hero?.visual?.screen?.src || '/product-dashboard-uhd.webp'}`}
+        ogImage={product.hero?.visual?.screen?.src || DEFAULT_OG_IMAGE_PATH}
+        ogImageAlt={`${product.name} social preview`}
         jsonLd={seoJsonLd}
       />
       <a className="skip-link" href="#main">Skip to content</a>
