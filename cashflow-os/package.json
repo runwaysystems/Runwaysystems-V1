@@ -13,7 +13,8 @@
     "test:regression": "node tests/ledger-fold-regression.mjs",
     "test:visibility": "node tests/product-visibility-regression.mjs",
     "test:worker": "node tests/worker-local-regression.mjs",
-    "test:csp": "node tests/csp-avatar-regression.mjs"
+    "test:csp": "node tests/csp-avatar-regression.mjs",
+    "test:checkout-modal": "node tests/checkout-modal-crash-regression.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.109.0",

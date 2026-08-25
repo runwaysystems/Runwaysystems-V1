@@ -17,6 +17,7 @@ import {
   Music2,
   ShoppingBag,
   Sun,
+  X,
 } from 'lucide-react'
 import { AccountButton } from './AuthUI'
 import { Logo, RunwayMark } from './Brand'
