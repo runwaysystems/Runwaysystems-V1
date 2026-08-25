@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
 MODE="full"
-PAGES_PROJECT="${PAGES_PROJECT:-runway-systems-storefront}"
+PAGES_PROJECT="${PAGES_PROJECT:-runwaysystems}"
 WORKER_CONFIG="worker/wrangler.toml"
 D1_NAME="cashflow-os-platform"
 R2_BUCKET="runway-product-media"
