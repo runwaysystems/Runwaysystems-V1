@@ -1639,12 +1639,17 @@ async function createLemonSqueezyCheckout(env, user, items, settings, bundle = n
   const isMultiItem = items.length > 1
   let variantId = String(items[0].product.lemonVariantId || '').trim()
   if (!variantId) throw new HttpError(503, `No Lemon Squeezy variant is configured for ${items[0].product.name}`)
+  // Lemon Squeezy only accepts string values in checkout_data.custom. An
+  // array for product_keys is rejected as 422 and surfaces to the buyer as
+  // "The payment service could not complete the request". Store and variant
+  // belong in relationships, not attributes, on create.
   const attributes = {
-    store_id: Number(storeId),
-    variant_id: Number(variantId),
     checkout_data: {
-      email: user.email,
-      custom: { user_id: user.id, product_keys: productKeys },
+      email: String(user.email || ''),
+      custom: {
+        user_id: String(user.id || ''),
+        product_keys: productKeys.join(','),
+      },
     },
     product_options: { redirect_url: `${origin}/success`, enabled_variants: [Number(variantId)] },
     expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
@@ -1679,7 +1684,6 @@ async function createLemonSqueezyCheckout(env, user, items, settings, bundle = n
       name: checkoutName,
       description: lines.join('\n'),
     }
-    attributes.variant_id = Number(variantId)
   }
   const payload = {
     data: {
@@ -2170,7 +2174,23 @@ async function processEmailQueues(env) {
   await env.DB.prepare('DELETE FROM rate_limits WHERE expires_at < ?').bind(nowIso()).run()
 }
 
-async function recordLemonOrder(env, data, eventKey, eventName) {
+function parseCheckoutProductKeys(custom) {
+  const raw = custom?.product_keys ?? custom?.product_key ?? ''
+  if (Array.isArray(raw)) return raw.map((value) => String(value || '').trim()).filter(Boolean)
+  return String(raw || '').split(',').map((value) => value.trim()).filter(Boolean)
+}
+
+function customDataFromLemonEvent(event, attributes) {
+  // Official webhooks put custom checkout data on meta.custom_data. Older
+  // fixtures and some order payloads also echo it on attributes.custom.
+  const fromMeta = event?.meta?.custom_data
+  const fromAttributes = attributes?.custom
+  return (fromMeta && typeof fromMeta === 'object' && !Array.isArray(fromMeta))
+    ? fromMeta
+    : (fromAttributes && typeof fromAttributes === 'object' ? fromAttributes : {})
+}
+
+async function recordLemonOrder(env, data, eventKey, eventName, event = null) {
   const attributes = data?.attributes || {}
   const status = String(attributes.status || '').toLowerCase()
   if (status !== 'paid') {
@@ -2181,9 +2201,9 @@ async function recordLemonOrder(env, data, eventKey, eventName) {
   }
   const identifier = String(attributes.identifier || data.id || '').trim()
   const email = String(attributes.user_email || '').trim().toLowerCase()
-  const custom = attributes.custom || {}
+  const custom = customDataFromLemonEvent(event, attributes)
   const userId = String(custom.user_id || '').trim()
-  const keys = Array.isArray(custom.product_keys) ? custom.product_keys : (custom.product_key ? [custom.product_key] : [])
+  const keys = parseCheckoutProductKeys(custom)
   if (!identifier || !userId || !email) throw new HttpError(400, 'Lemon Squeezy order is missing account ownership metadata')
   const items = []
   for (const rawKey of keys.slice(0, 10)) {
@@ -2328,7 +2348,7 @@ async function handleLemonSqueezyWebhook(request, env, ctx) {
     // When the key is absent, we log a warning and continue; the
     // HMAC verification above is the primary defence.
     if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) {
-      const expectedUserId = String(event?.data?.attributes?.custom?.user_id || '').trim()
+      const expectedUserId = String(customDataFromLemonEvent(event, event?.data?.attributes)?.user_id || '').trim()
       const expectedEmail = String(event?.data?.attributes?.user_email || '').trim().toLowerCase()
       if (expectedUserId) {
         try {
@@ -2357,7 +2377,7 @@ async function handleLemonSqueezyWebhook(request, env, ctx) {
     } else {
       logEvent('warn', 'webhook_ownership_check_skipped', { reason: 'SUPABASE_SERVICE_ROLE_KEY not set' })
     }
-    const purchases = await recordLemonOrder(env, event.data, eventKey, eventName)
+    const purchases = await recordLemonOrder(env, event.data, eventKey, eventName, event)
     for (const purchase of purchases) {
       if (purchase.payment_status === 'paid') ctx.waitUntil(deliverPurchaseEmail(env, purchase))
     }

@@ -652,6 +652,8 @@ try {
       && workerSource.includes('revoked_orders')
       && workerSource.includes('lemonVariantId')
       && workerSource.includes('custom_price')
+      && workerSource.includes('product_keys: productKeys.join(\',\')')
+      && workerSource.includes('customDataFromLemonEvent')
       && workerSource.includes('Runway Systems Suite Bundle')
       && workerSource.includes('lemonSqueezyBundleVariantId')
       && adminSource.includes('Lemon Squeezy acts as the merchant of record')

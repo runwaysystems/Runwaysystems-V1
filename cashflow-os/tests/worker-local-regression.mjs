@@ -533,6 +533,33 @@ if (OWNER_TOKEN) {
     && Number(analyticsAfterLegacy.payload?.totalSales || 0) === salesBefore + 3
     && Number(analyticsAfterLegacy.payload?.revenue || 0) === revenueBefore + 109, `${legacyWebhook.response.status} ${legacyWebhook.text.slice(0, 160)}`)
 
+  const officialCustomEvent = {
+    meta: {
+      event_name: 'order_created',
+      custom_data: { user_id: 'regression-official-user', product_keys: 'cashflow-os,invoice-os' },
+    },
+    data: {
+      id: String(4500 + (Date.now() % 100000)),
+      type: 'orders',
+      attributes: {
+        identifier: `ls-official-custom-${Date.now()}`,
+        order_number: 4501,
+        user_email: 'official-custom@example.com',
+        user_name: 'Official Custom',
+        status: 'paid',
+        subtotal: 6100,
+        total: 6800,
+        currency: 'USD',
+        created_at: new Date().toISOString(),
+        first_order_item: { variant_id: 99999, price: 6100 },
+      },
+    },
+  }
+  const officialCustomWebhook = await signedLemonWebhook(officialCustomEvent)
+  const analyticsAfterOfficial = await request('/admin/analytics', { headers: ownerHeaders })
+  check('official Lemon Squeezy custom_data strings grant every listed product', officialCustomWebhook.response.status === 200
+    && Number(analyticsAfterOfficial.payload?.totalSales || 0) === salesBefore + 5, `${officialCustomWebhook.response.status} ${officialCustomWebhook.text.slice(0, 160)}`)
+
   // Account deletion: the owner user buys something, then deletes their data.
   // Personal fields must be wiped while aggregate metrics survive.
   const deleteFlowEvent = {
