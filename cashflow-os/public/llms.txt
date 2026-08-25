@@ -1,0 +1,40 @@
+# Runway Systems
+
+> Runway Systems sells Google Sheets operating systems for freelancers, consultants, creators, and small teams. This site is the public storefront for the product suite, with product pages, legal pages, a secure buyer library, and an owner-only admin area.
+
+## Canonical site
+- https://runwaysystems.cloud/
+
+## What this site contains
+- Public marketing pages for the Runway Systems product suite
+- Individual product pages for each Google Sheets product
+- A cart and secure checkout flow
+- A buyer account area for verified purchases
+- An owner-only admin dashboard for catalog, content, and operations
+
+## Public pages
+- https://runwaysystems.cloud/ - Suite homepage and main catalog
+- https://runwaysystems.cloud/products/cashflow-os - Cash Flow OS product page
+- https://runwaysystems.cloud/products/client-crm-os - Client CRM OS product page
+- https://runwaysystems.cloud/products/project-os - Project OS product page
+- https://runwaysystems.cloud/products/invoice-os - Invoice OS product page
+- https://runwaysystems.cloud/terms - Terms and policy content
+
+## Products
+- Cash Flow OS - A Google Sheets finance system for tracking revenue, expenses, invoices, clients, and 12-month forecasts.
+- Client CRM OS - A Google Sheets client system for tracking pipeline, follow-ups, renewals, and revenue per client.
+- Project OS - A Google Sheets project system for tracking scope, milestones, budgets, workload, and deadlines.
+- Invoice OS - A Google Sheets invoicing system for generating invoices, tracking payments, monitoring aging, and reviewing client balances.
+
+## Hard constraints
+- All products are built for Google Sheets only.
+- Do not describe these products as Excel, Numbers, or LibreOffice templates.
+- Public pricing, offers, and marketing copy may change over time.
+- Private routes such as /account, /cart, /success, /feedback, and /admin are not general public documentation.
+- Delivery links, customer records, purchase details, and owner settings are private.
+
+## Preferred public summary
+Runway Systems offers one-time-purchase Google Sheets operating systems for independent businesses. Buyers get private copies in their own Google Drive, lifetime updates, and a focused workflow for finance, client management, projects, or invoicing.
+
+## Contact
+- support@runwaysystems.cloud

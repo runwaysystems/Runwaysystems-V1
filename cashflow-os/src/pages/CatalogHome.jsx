@@ -9,6 +9,7 @@ import { usePublicProducts } from '../hooks/usePublicProducts'
 import { usePageAnimations } from '../hooks/usePageAnimations'
 import { siteCopy } from '../lib/siteCopy'
 import { introSeenInSession } from '../lib/introState'
+import { DEFAULT_OG_IMAGE_PATH } from '../lib/seo'
 import { useCart } from '../context/CartContext'
 import { BrandIntro, Footer, Navbar, SUPPORT_EMAIL } from '../components/StorefrontShell'
 import Seo from '../components/Seo'
@@ -301,7 +302,8 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
         title={siteCopy(config).homeSeo.title}
         description={siteCopy(config).homeSeo.description}
         canonicalPath="/"
-        ogImage={`${window.location.origin}/product-dashboard-uhd.webp`}
+        ogImage={DEFAULT_OG_IMAGE_PATH}
+        ogImageAlt="Runway Systems suite social preview"
         jsonLd={[
           {
             id: 'jsonld-organization',

@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { DEFAULT_OG_IMAGE_ALT, DEFAULT_OG_IMAGE_PATH, resolveSeoUrl } from '../lib/seo'
 
 // Head manager for SEO: title, description, canonical, Open Graph, Twitter
 // cards, robots directives, and JSON-LD structured data. Google renders the
@@ -9,7 +10,7 @@ const escapeXml = (value) => String(value ?? '')
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
   .replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;')
+  .replace(/\"/g, '&quot;')
   .replace(/'/g, '&apos;')
 
 const escapeJsonLd = (value) => String(value ?? '')
@@ -54,12 +55,15 @@ export default function Seo({
   description,
   canonicalPath = '',
   ogType = 'website',
-  ogImage = '',
+  ogImage = DEFAULT_OG_IMAGE_PATH,
+  ogImageAlt = DEFAULT_OG_IMAGE_ALT,
   noindex = false,
   jsonLd = [],
 }) {
   useEffect(() => {
     const canonical = `${window.location.origin}${canonicalPath || window.location.pathname}`
+    const resolvedOgImage = resolveSeoUrl(ogImage || DEFAULT_OG_IMAGE_PATH)
+    const resolvedOgImageAlt = ogImageAlt || DEFAULT_OG_IMAGE_ALT
 
     document.title = title
     upsertMeta('name', 'description', description)
@@ -70,13 +74,11 @@ export default function Seo({
     upsertMeta('property', 'og:site_name', 'Runway Systems')
     upsertMeta('property', 'og:url', canonical)
     upsertMeta('property', 'og:locale', 'en_US')
-    if (ogImage) {
-      upsertMeta('property', 'og:image', ogImage)
-      upsertMeta('name', 'twitter:card', 'summary_large_image')
-      upsertMeta('name', 'twitter:image', ogImage)
-    } else {
-      upsertMeta('name', 'twitter:card', 'summary')
-    }
+    upsertMeta('property', 'og:image', resolvedOgImage)
+    upsertMeta('property', 'og:image:alt', resolvedOgImageAlt)
+    upsertMeta('name', 'twitter:card', 'summary_large_image')
+    upsertMeta('name', 'twitter:image', resolvedOgImage)
+    upsertMeta('name', 'twitter:image:alt', resolvedOgImageAlt)
     upsertMeta('name', 'twitter:title', title)
     upsertMeta('name', 'twitter:description', description)
     upsertLink('canonical', canonical)
@@ -86,7 +88,7 @@ export default function Seo({
     return () => {
       for (const { id } of jsonLd) document.getElementById(id)?.remove()
     }
-  }, [title, description, canonicalPath, ogType, ogImage, noindex, JSON.stringify(jsonLd)])
+  }, [title, description, canonicalPath, ogType, ogImage, ogImageAlt, noindex, JSON.stringify(jsonLd)])
 
   return null
 }
