@@ -63,11 +63,11 @@ preflight() {
   # localStorage preview adapter. If it is empty at BUILD time, the deployed
   # site silently serves seeded demo data and admin edits never reach the
   # database, so treat it as a hard failure rather than a warning.
-  if [ -z "${VITE_API_BASE_URL:-}" ] && ! grep -qs '^VITE_API_BASE_URL=.\+' .env; then
+  if [ -z "${VITE_API_BASE_URL:-}" ] && ! grep -qs '^VITE_API_BASE_URL=.\+' .env.example; then
     fail "VITE_API_BASE_URL is not set. Building now would ship the localStorage preview adapter:
     the admin dashboard would show mock data and product edits would never reach the database.
     Fix it in one of these ways, then redeploy:
-      - local build : add VITE_API_BASE_URL=https://<your-worker>.workers.dev to cashflow-os/.env
+      - local build : add VITE_API_BASE_URL=https://<your-worker>.workers.dev to cashflow-os/.env.example
       - Pages build : set VITE_API_BASE_URL in the Pages project build environment variables
     Note that Cloudflare Pages needs it set for BOTH Production and Preview environments."
   fi
