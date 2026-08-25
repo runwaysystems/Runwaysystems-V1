@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Library, LogOut, ShieldCheck, UserRound, X } from 'lucide-react'
 import { Link } from 'react-router-dom'
@@ -27,6 +27,25 @@ function initials(name = '') {
     .toUpperCase() || 'RS'
 }
 
+// Google returns profile pictures from googleusercontent.com. A URL can still
+// expire, be blocked by a visitor's network, or fail to decode, so never leave
+// a browser's broken-image glyph in an account control. The initials fallback
+// is intentionally decorative because nearby labels already announce the user.
+function UserAvatar({ profile, fallbackClassName = '' }) {
+  const avatar = profile?.avatar || ''
+  const [avatarFailed, setAvatarFailed] = useState(false)
+
+  useEffect(() => {
+    setAvatarFailed(false)
+  }, [avatar])
+
+  if (avatar && !avatarFailed) {
+    return <img src={avatar} alt="" referrerPolicy="no-referrer" onError={() => setAvatarFailed(true)} />
+  }
+
+  return <span className={fallbackClassName || undefined} aria-hidden="true">{initials(profile?.name)}</span>
+}
+
 export function AccountButton({ compact = false }) {
   const { profile, loading, openAuth } = useAuth()
 
@@ -37,10 +56,8 @@ export function AccountButton({ compact = false }) {
       onClick={openAuth}
       aria-label={profile ? `Open account for ${profile.name}` : 'Sign in'}
     >
-      {profile?.avatar ? (
-        <img src={profile.avatar} alt="" referrerPolicy="no-referrer" />
-      ) : profile ? (
-        <span className="account-initials" aria-hidden="true">{initials(profile.name)}</span>
+      {profile ? (
+        <UserAvatar profile={profile} fallbackClassName="account-initials" />
       ) : (
         <UserRound size={16} aria-hidden="true" />
       )}
@@ -95,11 +112,7 @@ export function AuthModal() {
             <p className="eyebrow">ACCOUNT</p>
             <h2 id="auth-title">Good to see you, {profile.name.split(' ')[0]}.</h2>
             <div className="auth-profile-card">
-              {profile.avatar ? (
-                <img src={profile.avatar} alt="" referrerPolicy="no-referrer" />
-              ) : (
-                <span>{initials(profile.name)}</span>
-              )}
+              <UserAvatar profile={profile} />
               <div>
                 <strong>{profile.name}</strong>
                 <small>{profile.email}</small>

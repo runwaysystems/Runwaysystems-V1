@@ -2,6 +2,16 @@
 # The CSP below assumes the platform Worker runs on *.workers.dev and
 # Supabase on *.supabase.co. If you use custom domains, add them to
 # connect-src (the Worker API origin) before deploying.
+#
+# `no-transform` deliberately keeps Cloudflare from appending its automatic
+# Web Analytics beacon and JavaScript Detection inline snippet to Pages HTML.
+# Those edge-injected scripts are not part of this build and cannot safely use
+# a static CSP nonce or hash. Do not weaken script-src with unsafe-inline to
+# accommodate them; use nonce-generating edge middleware if those features are
+# intentionally enabled later.
+#
+# COEP remains cross-origin isolated via credentialless while allowing public
+# Google OAuth avatars to load without third-party credentials.
 
 /*
   X-Content-Type-Options: nosniff
@@ -12,5 +22,6 @@
   X-Permitted-Cross-Domain-Policies: none
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Resource-Policy: same-site
-  Cross-Origin-Embedder-Policy: require-corp
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.r2.cloudflarestorage.com https://*.r2.dev; connect-src 'self' https://*.workers.dev https://*.runwaysystems.cloud https://*.supabase.co wss://*.supabase.co; frame-src 'self' https://accounts.google.com https://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self' https://*.supabase.co https://accounts.google.com; frame-ancestors 'none'; upgrade-insecure-requests
+  Cross-Origin-Embedder-Policy: credentialless
+  Cache-Control: no-transform
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://widget.trustpilot.com 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.r2.cloudflarestorage.com https://*.r2.dev https://*.googleusercontent.com; connect-src 'self' https://*.workers.dev https://*.runwaysystems.cloud https://*.supabase.co wss://*.supabase.co; frame-src 'self' https://accounts.google.com https://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self' https://*.supabase.co https://accounts.google.com; frame-ancestors 'none'; upgrade-insecure-requests

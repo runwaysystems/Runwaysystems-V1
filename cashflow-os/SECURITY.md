@@ -169,6 +169,8 @@ vulnerabilities). Regression suite now 80 checks including the new guards.
 | Account deletion | `DELETE /account` removes/redacts all platform-held personal data; aggregate metrics stay anonymous |
 | Environment readiness | `/health` returns 200 with `ready: true` only when every critical variable/binding is set and non-placeholder, otherwise 503 with the missing names; `scripts/deploy.sh --check` refuses placeholder config |
 | Security headers | Every Worker response carries nosniff, `X-Frame-Options: DENY`, HSTS (1 year), a `default-src 'none'` CSP, and `Referrer-Policy: no-referrer`; the Pages storefront carries its own CSP in `public/_headers` |
+| Cloudflare HTML mutation | Pages sends `Cache-Control: no-transform`, so automatic Cloudflare Web Analytics and JavaScript Detection do not inject an external beacon or a request-specific inline script into a static, strict-CSP document. Do not add `unsafe-inline` or a copied console hash; opt in only with nonce-generating edge middleware. |
+| OAuth avatars | `img-src` allows Google user-content hosts and COEP uses `credentialless`, so public Google profile images can render without third-party credentials; the UI falls back to initials on any image error. |
 | Correlation ids | Every response has an `X-Correlation-Id` header; error bodies include `correlationId`; detailed errors (redacted) are logged server-side only |
 | Rate limiting | Auth-touching endpoints are rate-limited; token validation adds a per-IP auth-gate (300/10 min). Login, OTP, and password reset live at Supabase - enable Supabase rate limits there for those flows |
 | CORS | Exact-origin allowlist from `APP_ORIGIN`, no wildcards, explicit methods/headers, `X-Correlation-Id` exposed |
