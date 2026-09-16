@@ -2646,10 +2646,10 @@ async function handleRequest(request, env, ctx) {
       `<url><loc>${escapeXml(origin)}/terms</loc><changefreq>monthly</changefreq><priority>0.4</priority></url>`,
       ...products.map((product) => `<url><loc>${escapeXml(origin)}/products/${escapeXml(product.key)}</loc>${product.updatedAt ? `<lastmod>${escapeXml(product.updatedAt.slice(0, 10))}</lastmod>` : ''}<changefreq>weekly</changefreq><priority>0.9</priority></url>`),
     ]
-    const xml = await getCachedPublic('sitemap', 3600, async () => `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n${urls.join('\n')}\n</urlset>`)
+    const xml = await getCachedPublic('sitemap', 60, async () => `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n${urls.join('\n')}\n</urlset>`)
     return new Response(xml, {
       status: 200,
-      headers: { 'Content-Type': 'application/xml; charset=utf-8', ...SECURITY_HEADERS, 'Cache-Control': 'public, max-age=3600' },
+      headers: { 'Content-Type': 'application/xml; charset=utf-8', ...SECURITY_HEADERS, 'Cache-Control': 'public, max-age=0, must-revalidate' },
     })
   }
   if (path === '/events/page-view' && request.method === 'POST') {

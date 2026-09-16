@@ -1,8 +1,38 @@
-/* /index.html 200
+# Cloudflare Pages routing rules for the React storefront.
+#
+# Do not use `/* /index.html 200`: Wrangler rejects that catch-all as an
+# index rewrite loop, and on hosts that do accept it, putting it before real
+# files can make /sitemap.xml, /robots.txt, or /health render the React "Page
+# not found" screen instead of XML/text/JSON. The build copies index.html to
+# app-shell.html; these route-specific rewrites target the extensionless
+# /app-shell asset so direct visits to URLs listed in the sitemap keep their
+# original path and boot React Router correctly.
 
-# Dynamic sitemap: products created later in the admin panel appear in the
-# Worker's /sitemap.xml automatically (it reads the D1 products table).
-# This proxies /sitemap.xml on this hostname to the Worker so crawlers see
-# every active product without a rebuild.
-/sitemap.xml https://cashflow-os-platform.runwaysystems-cloud.workers.dev/sitemap.xml 200
+/sitemap /sitemap.xml 301
+/sitemap/ /sitemap.xml 301
+/sitemap.xml/ /sitemap.xml 301
+/robots /robots.txt 301
+/robots/ /robots.txt 301
+/robots.txt/ /robots.txt 301
+/health/ /health 301
 
+/app-shell / 301
+/cart /app-shell 200
+/cart/ /app-shell 200
+/terms /app-shell 200
+/terms/ /app-shell 200
+/success /app-shell 200
+/success/ /app-shell 200
+/account /app-shell 200
+/account/ /app-shell 200
+/feedback /app-shell 200
+/feedback/ /app-shell 200
+/admin /app-shell 200
+/admin/ /app-shell 200
+/products/:productKey /app-shell 200
+/products/:productKey/ /app-shell 200
+
+# Dynamic sitemap note: Cloudflare Pages _redirects cannot proxy an external
+# Worker with a 200 rewrite. The build writes dist/sitemap.xml, and the
+# functions/sitemap.xml.js Pages Function can serve the Worker-backed dynamic
+# sitemap from this hostname when SITEMAP_SOURCE_URL or VITE_API_BASE_URL is set.

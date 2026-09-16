@@ -128,7 +128,7 @@ variables** (they are compiled into the frontend at build time):
 
 | Variable | Value |
 |---|---|
-| `VITE_API_BASE_URL` | Worker URL, e.g. `https://cashflow-os-platform.YOUR_SUBDOMAIN.workers.dev` |
+| `VITE_API_BASE_URL` | Worker URL, e.g. `https://cashflow-os-platform.YOUR_SUBDOMAIN.workers.dev`. Production falls back to the Runway Systems Worker if this is missing, but set it explicitly for staging/custom Worker domains. |
 | `VITE_SUPPORT_EMAIL` | Public support address |
 | `VITE_SUPABASE_URL` | Supabase project URL |
 | `VITE_SUPABASE_ANON_KEY` | Supabase public anon key (public by design; see the RLS requirement below) |
@@ -160,8 +160,14 @@ npx wrangler pages project create runway-systems-storefront --production-branch 
 npx wrangler pages deploy dist --project-name runway-systems-storefront
 ```
 
-The SPA router needs the rewrite already included in
-`public/_redirects` (`/* /index.html 200`).
+`public/_redirects` uses route-specific SPA rewrites to `/app-shell`, a build
+copy of `index.html`. This avoids Cloudflare's `/index.html` normalization loop
+while keeping real SEO and status files reachable. Git and Wrangler deploys
+from the project root also include Pages Functions for `/sitemap.xml`,
+`/robots.txt`, and `/health`; dashboard `dist/` drag-and-drop still serves the
+generated static sitemap and robots files. After deploy, verify client routes
+(for example `/terms` and `/products/cashflow-os`) and machine-readable URLs
+(`/sitemap.xml`, `/robots.txt`, `/health`) return the expected content.
 
 ---
 
@@ -231,11 +237,16 @@ The storefront ships with full SEO out of the box:
   every route. Google renders the JavaScript, so pages for products created
   later in the admin panel are fully crawlable without redeploys.
 - **Sitemaps:** `npm run build` writes `dist/sitemap.xml` and
-  `dist/robots.txt` for every code-defined route. The Worker also serves a
-  dynamic `/sitemap.xml` that includes products created in the admin panel.
-  To put the dynamic sitemap on your storefront hostname, add one line to
-  `public/_redirects` (template included) proxying `/sitemap.xml` to your
-  deployed Worker, then rebuild and redeploy.
+  `dist/robots.txt` for every code-defined route. Keep that generated XML in
+  the build so `/sitemap.xml` can fall back to real XML instead of the React
+  404 page. The Worker also serves a dynamic `/sitemap.xml` that includes
+  active products from the dashboard and automatically omits hidden or deleted
+  products; `functions/sitemap.xml.js` exposes that Worker-backed XML on the
+  storefront host via `SITEMAP_SOURCE_URL`, `VITE_API_BASE_URL`, or the
+  production Worker fallback, and falls back to the static file if the Worker is
+  unavailable. Do not use a `public/_redirects` `200` rule to proxy the external
+  Worker URL: Cloudflare Pages only supports `200` proxy rewrites to relative
+  paths.
 - **Build domain:** set `SITE_URL=https://your-domain.com` when building so
   the static sitemap and canonical URLs use your production domain.
 - **Crawl hygiene:** /account, /feedback, /admin, /success, /cart, and the
@@ -254,7 +265,7 @@ The storefront ships with full SEO out of the box:
 | Dependencies | `cashflow-os/package.json`, `cashflow-os/package-lock.json` |
 | Worker | `cashflow-os/worker/src/index.js`, `cashflow-os/worker/wrangler.toml` |
 | Database schema | `cashflow-os/worker/migrations/*.sql` (applied automatically, in order) |
-| SEO artifacts | `dist/sitemap.xml`, `dist/robots.txt` (generated at build), `public/_redirects`, `src/components/Seo.jsx`, `scripts/generate-sitemap.mjs` |
+| SEO / routing artifacts | `dist/sitemap.xml`, `dist/robots.txt`, `dist/app-shell.html` (generated at build), `public/_redirects`, `public/_routes.json`, `functions/sitemap.xml.js`, `functions/robots.txt.js`, `functions/health.js`, `src/components/Seo.jsx`, `scripts/generate-sitemap.mjs` |
 | Deployment | `cashflow-os/scripts/deploy.sh`, this guide |
 
 Everything else (`tests/`, `reference/`, `README`s) is development or

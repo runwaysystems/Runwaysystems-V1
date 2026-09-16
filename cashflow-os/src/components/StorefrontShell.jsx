@@ -22,7 +22,7 @@ import {
 import { AccountButton } from './AuthUI'
 import { Logo, RunwayMark } from './Brand'
 import { SUITE_NAME } from '../data/catalog'
-import { markIntroSeenInSession } from '../lib/introState'
+import { introSeenForVisitor, markIntroSeenForVisitor } from '../lib/introState'
 import { useCart } from '../context/CartContext'
 import { openConsentPreferences } from './ConsentBanner'
 import { getPublicConfigCache } from '../lib/publicConfigCache'
@@ -114,7 +114,7 @@ export function BrandIntro({ onComplete }) {
   const finishedRef = useRef(false)
   const previousFocusRef = useRef(null)
   const previousOverflowRef = useRef('')
-  const repeatVisitorRef = useRef(Boolean(readStorage('runway-intro-seen')))
+  const repeatVisitorRef = useRef(introSeenForVisitor())
   const [skipVisible, setSkipVisible] = useState(false)
 
   const finish = useCallback(() => {
@@ -122,8 +122,7 @@ export function BrandIntro({ onComplete }) {
     finishedRef.current = true
     timelineRef.current?.kill()
     dashTweenRef.current?.kill()
-    writeStorage('runway-intro-seen', 'true')
-    markIntroSeenInSession()
+    markIntroSeenForVisitor()
     document.body.style.overflow = previousOverflowRef.current
     const previousFocus = previousFocusRef.current
     onComplete()
@@ -133,6 +132,9 @@ export function BrandIntro({ onComplete }) {
   }, [onComplete])
 
   useEffect(() => {
+    // Persist as soon as the first-time intro starts, not only when it
+    // completes, so a refresh during the animation does not replay it.
+    markIntroSeenForVisitor()
     const skipTimer = window.setTimeout(() => setSkipVisible(true), repeatVisitorRef.current ? 400 : 850)
     return () => window.clearTimeout(skipTimer)
   }, [])

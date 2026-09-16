@@ -1,10 +1,11 @@
-// Build-time SEO artifacts: dist/sitemap.xml and dist/robots.txt.
+// Build-time SEO artifacts plus the Cloudflare Pages SPA fallback shell.
 //
 // The static sitemap covers every route that exists in code. Products added
 // later through the admin panel are covered by the dynamic sitemap served by
-// the Worker at /sitemap.xml - see DEPLOYMENT.md for the one-line Pages
-// proxy that keeps everything on the same hostname.
-import { writeFile, mkdir } from 'node:fs/promises'
+// the Worker at /sitemap.xml on the Worker hostname. Cloudflare Pages
+// _redirects cannot 200-proxy external hosts, so functions/sitemap.xml.js
+// serves the Worker XML when configured and falls back to this generated file.
+import { writeFile, mkdir, copyFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { CATALOG } from '../src/data/catalog.js'
 
@@ -68,4 +69,10 @@ const robots = [
 await mkdir(dirname('dist/sitemap.xml'), { recursive: true })
 await writeFile('dist/sitemap.xml', xml)
 await writeFile('dist/robots.txt', robots)
-console.log(`[seo] dist/sitemap.xml (${urls.length} urls) and dist/robots.txt written for ${SITE_URL}`)
+
+// Cloudflare Pages normalizes /index.html to /, which turns a 200 rewrite to
+// /index.html into a path-losing 308 redirect. Keep a second copy of the same
+// SPA shell under an extensionless route target used by public/_redirects.
+await copyFile('dist/index.html', 'dist/app-shell.html')
+
+console.log(`[seo] dist/sitemap.xml (${urls.length} urls), dist/robots.txt, and dist/app-shell.html written for ${SITE_URL}`)

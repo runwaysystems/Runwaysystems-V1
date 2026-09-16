@@ -4,21 +4,27 @@
 
 import { defaultProducts } from '../data/catalog'
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+const DEFAULT_PRODUCTION_API_BASE_URL = 'https://cashflow-os-platform.runwaysystems-cloud.workers.dev'
+const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.DEV ? '' : DEFAULT_PRODUCTION_API_BASE_URL)
 
 // The localStorage adapter below is a PREVIEW-ONLY provider for interface
-// development. It is selected purely by VITE_API_BASE_URL being empty, which
-// means a production build made without that variable silently ships seeded
-// demo data and writes admin edits to the visitor's own browser instead of
-// the database. That failure is invisible at build time, so surface it loudly
-// at runtime and let the UI badge it.
+// development. Local dev may still opt into it by leaving VITE_API_BASE_URL
+// empty, but production builds now fall back to the Runway Systems Worker so
+// dashboard edits persist to D1 and the sitemap can reflect active products.
 export const IS_PREVIEW_DATA = !API_BASE_URL
+
+if (!configuredApiBaseUrl && API_BASE_URL && typeof window !== 'undefined' && !import.meta.env.DEV) {
+  console.warn(
+    '[Runway Systems] VITE_API_BASE_URL is not set in this build. Falling back to ' +
+    `${DEFAULT_PRODUCTION_API_BASE_URL}. Set VITE_API_BASE_URL explicitly in Pages for staging or custom Worker domains.`,
+  )
+}
 
 if (IS_PREVIEW_DATA && typeof window !== 'undefined' && !import.meta.env.DEV) {
   console.error(
-    '[Runway Systems] VITE_API_BASE_URL is not set in this build. The storefront is running on ' +
-    'preview mock data: dashboard numbers are seeded demo values and product edits are saved only ' +
-    'to this browser. Set VITE_API_BASE_URL to your Worker URL in the Pages build variables and redeploy.',
+    '[Runway Systems] The storefront is running on preview mock data: dashboard numbers are seeded demo values ' +
+    'and product edits are saved only to this browser. Set VITE_API_BASE_URL to your Worker URL in the Pages build variables and redeploy.',
   )
 }
 const STORAGE_KEY = 'cashflow-platform-mock-v2'

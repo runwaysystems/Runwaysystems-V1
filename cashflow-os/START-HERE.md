@@ -72,18 +72,26 @@ version:
 
 ### 3. Deploy the storefront (Pages)
 
-1. Build env vars: `VITE_API_BASE_URL` (your Worker URL),
-   `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`,
+1. Build env vars: `VITE_API_BASE_URL` (your Worker URL; production has a
+   Runway Systems fallback, but set this explicitly for staging/custom Worker
+   domains), `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`,
    `VITE_SUPPORT_EMAIL`, and optionally `VITE_TRUSTPILOT_REVIEW_URL` /
    `VITE_TRUSTPILOT_BUSINESS_UNIT_ID`.
 2. Build: root directory `cashflow-os`, command `npm ci && npm run build`,
    output `dist`. For the SEO sitemap and canonicals, also set
    `SITE_URL=https://your-domain.com`.
 3. Deploy `dist/` (dashboard drag-and-drop, `wrangler pages deploy`, or
-   Git integration on the `main` branch).
-4. **Verify the dashboard config:**
+   Git integration on the `main` branch). The build includes `app-shell.html`,
+   which `public/_redirects` uses for direct visits to React routes. Git and
+   Wrangler deploys from the project root also include the `/sitemap.xml` Pages
+   Function route, which falls back to static XML instead of swallowing the
+   sitemap.
+4. **Verify the dashboard config and crawl URLs:**
    - `https://STORE.workers.dev/health` returns
      `{"ok":true,"ready":true,"missing":[]}`
+   - `https://YOUR_SITE.pages.dev/health` returns JSON, not the storefront 404
+   - `https://YOUR_SITE.pages.dev/sitemap.xml` returns XML and updates from the dashboard's active products
+   - `https://YOUR_SITE.pages.dev/robots.txt` returns plain text
    - `https://YOUR_SITE.pages.dev/` loads the storefront
 
 ### 4. Configure everything from the admin panel (no redeploys)
@@ -119,10 +127,11 @@ Sign in as the owner (Supabase `app_metadata.owner`), open **Admin**:
 
 ### 6. Post-launch
 
-- Submit `sitemap.xml` in Google Search Console (the Worker serves a
-  dynamic sitemap that includes products you add later; see DEPLOYMENT.md
-  section 4.5 for the one-line redirect that puts it on your storefront
-  domain).
+- Submit `sitemap.xml` in Google Search Console. The build writes a static
+  storefront sitemap; the Worker also serves a dynamic sitemap for products
+  you add later, and `functions/sitemap.xml.js` can expose it on the storefront
+  host. See DEPLOYMENT.md section 4.5 before changing sitemap routing, because
+  Cloudflare Pages `_redirects` cannot `200`-proxy an external Worker URL.
 - Keep the checklist in **DEPLOYMENT.md section 4** handy for
   verification.
 

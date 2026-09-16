@@ -269,23 +269,27 @@ The pricing area uses a star-rating TrustBox, not a review carousel. Replace the
 
 Every verified buyer must continue to receive the same neutral invitation, regardless of rating or private feedback. Do not add positive-rating gates, selective invitation logic, or incentives.
 
-## SPA hosting and rewrites
+## SPA hosting, static files, and sitemaps
 
-`public/_redirects` is included for hosts that support Netlify-style SPA rewrites:
-
-```text
-/* /index.html 200
-```
-
-For Cloudflare Pages, deploy the Vite output directory `dist` and confirm direct visits to these routes return the SPA:
+For Cloudflare Pages, deploy the Vite output directory `dist` and confirm direct visits to these routes return the SPA while real files stay real files:
 
 - `/account`
 - `/success`
 - `/feedback`
 - `/admin`
 - `/terms`
+- `/products/cashflow-os`
+- `/sitemap.xml` (must return XML, not the React 404 page)
+- `/robots.txt` (must return plain text)
+- `/health` (must return JSON)
 
-If the chosen host does not use `_redirects`, configure the equivalent fallback to `/index.html` while allowing real assets to pass through.
+`public/_redirects` uses route-specific rewrites to `/app-shell`, a copy of `index.html` emitted during `npm run build`. Do not add a global `/* /index.html 200` rule there: Wrangler rejects it as an index rewrite loop, and on hosts that accept it the rule can capture `/sitemap.xml`, `/robots.txt`, or `/health` unless exceptions come first.
+
+The frontend API client also falls back to the production Worker in non-dev builds if `VITE_API_BASE_URL` is missing, so dashboard product edits keep going to D1 instead of browser-only mock data.
+
+`functions/sitemap.xml.js` serves the Worker-backed dynamic sitemap from the storefront hostname via `SITEMAP_SOURCE_URL`, `VITE_API_BASE_URL`, or the production Worker fallback; if the Worker cannot be reached, it falls through to the generated static sitemap instead of the React 404 page. `functions/robots.txt.js` and `functions/health.js` keep those URLs machine-readable too. `public/_routes.json` limits Pages Function invocation to `/sitemap.xml`, `/robots.txt`, and `/health` so other static assets and app routes stay on the asset path.
+
+If the chosen host does not use Cloudflare Pages-style `_redirects`, configure the equivalent fallback to the SPA shell while explicitly allowing real assets, `/sitemap.xml`, `/robots.txt`, `/health`, and `/llms.txt` to pass through.
 
 ## API overview
 

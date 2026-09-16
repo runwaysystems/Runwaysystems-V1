@@ -77,7 +77,7 @@ try {
     return values.viewBox === '0 0 80 80' && values.r === LEDGER_R && values.s === LEDGER_S && values.seams === 1 && values.sparks === 1
   })
 
-  await check('repeat-visitor Skip remains delayed but becomes available', async () => {
+  await check('new-visitor Skip remains delayed but becomes available', async () => {
     await page.waitForTimeout(900)
     const skip = page.locator('.intro-skip')
     return await skip.isVisible() && await skip.getAttribute('aria-hidden') === 'false'
@@ -402,10 +402,22 @@ try {
     return backLinks && await page.locator('.brand-intro').count() === 0
   })
 
-  await check('a fresh page load still opens with the full introduction', async () => {
+  await check('a refresh skips the intro for a returning visitor', async () => {
     await page.goto(BASE_URL, { waitUntil: 'networkidle' })
-    const intro = page.locator('.brand-intro')
-    return await intro.isVisible() && await intro.getAttribute('aria-label') === 'Runway Systems introduction'
+    await page.waitForSelector('.products-grid')
+    return await page.locator('.brand-intro').count() === 0
+      && await page.evaluate(() => localStorage.getItem('runway-intro-seen') === 'true')
+  })
+
+  await check('a brand-new browser still opens with the full introduction', async () => {
+    const fresh = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: 'light' })
+    const freshPage = await fresh.newPage()
+    attachErrorCapture(freshPage, 'fresh-desktop')
+    await freshPage.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
+    const intro = freshPage.locator('.brand-intro')
+    const visible = await intro.isVisible() && await intro.getAttribute('aria-label') === 'Runway Systems introduction'
+    await fresh.close()
+    return visible
   })
 
   await check('/terms route renders legal content and the Ledger Fold lockup', async () => {
@@ -526,8 +538,17 @@ try {
     const cartSource = await readFile('src/pages/CartPage.jsx', 'utf8')
     const workerSource = await readFile('worker/src/index.js', 'utf8')
     const generatorSource = await readFile('scripts/generate-sitemap.mjs', 'utf8')
+    const redirectsSource = await readFile('public/_redirects', 'utf8')
+    const routesSource = await readFile('public/_routes.json', 'utf8')
+    const sitemapFunctionSource = await readFile('functions/sitemap.xml.js', 'utf8')
+    const robotsFunctionSource = await readFile('functions/robots.txt.js', 'utf8')
+    const healthFunctionSource = await readFile('functions/health.js', 'utf8')
     const packageSource = await readFile('package.json', 'utf8')
     const indexSource = await readFile('index.html', 'utf8')
+    const redirectRules = redirectsSource
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'))
     return seoSource.includes('og:title')
       && seoSource.includes('twitter:card')
       && seoSource.includes("upsertLink('canonical'")
@@ -545,9 +566,23 @@ try {
       && homeSource.includes('jsonld-website')
       && cartSource.includes('noindex')
       && workerSource.includes("path === '/sitemap.xml'")
+      && workerSource.includes('WHERE active = 1 ORDER BY sort_order ASC, key ASC')
       && workerSource.includes('updatedAt')
       && generatorSource.includes('dist/sitemap.xml')
       && generatorSource.includes('SITE_URL')
+      && generatorSource.includes('dist/app-shell.html')
+      && redirectsSource.includes('/app-shell')
+      && redirectRules.some((line) => /^\/products\/:productKey\s+\/app-shell\s+200\b/i.test(line))
+      && routesSource.includes('"/sitemap.xml"')
+      && routesSource.includes('"/robots.txt"')
+      && routesSource.includes('"/health"')
+      && sitemapFunctionSource.includes('looksLikeSitemapXml')
+      && sitemapFunctionSource.includes('context.next()')
+      && sitemapFunctionSource.includes('DEFAULT_API_BASE_URL')
+      && robotsFunctionSource.includes('Sitemap: ${origin}/sitemap.xml')
+      && healthFunctionSource.includes('platformUrl')
+      && !redirectRules.some((line) => /^\/\*\s+\/index\.html\s+200\b/i.test(line))
+      && !redirectRules.some((line) => /^\/sitemap\.xml\s+https?:\/\/\S+\s+200\b/i.test(line))
       && packageSource.includes('scripts/generate-sitemap.mjs')
       && indexSource.includes('og:site_name')
       && indexSource.includes('twitter:card')
@@ -862,7 +897,6 @@ try {
   await desktop.close()
 
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
-  await mobile.addInitScript(() => localStorage.setItem('runway-intro-seen', 'true'))
   const mobilePage = await mobile.newPage()
   attachErrorCapture(mobilePage, 'mobile')
   await mobilePage.goto(BASE_URL, { waitUntil: 'networkidle' })
