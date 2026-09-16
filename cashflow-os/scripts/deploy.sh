@@ -59,17 +59,11 @@ preflight() {
   test -f public/_headers || fail "public/_headers is missing (required for Pages security headers)"
 
   # Build-time frontend variables come from .env or the Pages dashboard.
-  # VITE_API_BASE_URL is the single switch between the real Worker API and the
-  # localStorage preview adapter. If it is empty at BUILD time, the deployed
-  # site silently serves seeded demo data and admin edits never reach the
-  # database, so treat it as a hard failure rather than a warning.
+  # VITE_API_BASE_URL is still recommended for staging/custom Worker domains.
+  # Production builds have a Runway Systems Worker fallback so the deployed
+  # dashboard does not silently save product edits to browser-only mock data.
   if [ -z "${VITE_API_BASE_URL:-}" ] && ! grep -qs '^VITE_API_BASE_URL=.\+' .env.example; then
-    fail "VITE_API_BASE_URL is not set. Building now would ship the localStorage preview adapter:
-    the admin dashboard would show mock data and product edits would never reach the database.
-    Fix it in one of these ways, then redeploy:
-      - local build : add VITE_API_BASE_URL=https://<your-worker>.workers.dev to cashflow-os/.env.example
-      - Pages build : set VITE_API_BASE_URL in the Pages project build environment variables
-    Note that Cloudflare Pages needs it set for BOTH Production and Preview environments."
+    say "warning: VITE_API_BASE_URL is not set; the storefront will use the production Worker fallback. Set it explicitly for staging or custom Worker domains."
   fi
 
   # Secrets can only be verified on the deployed Worker; list what is expected.

@@ -8,7 +8,7 @@ import { catalogIsAuthoritative, storefrontProducts } from '../lib/catalogAvaila
 import { usePublicProducts } from '../hooks/usePublicProducts'
 import { usePageAnimations } from '../hooks/usePageAnimations'
 import { siteCopy } from '../lib/siteCopy'
-import { introSeenInSession } from '../lib/introState'
+import { introSeenForVisitor } from '../lib/introState'
 import { DEFAULT_OG_IMAGE_PATH } from '../lib/seo'
 import { useCart } from '../context/CartContext'
 import { BrandIntro, Footer, Navbar, SUPPORT_EMAIL } from '../components/StorefrontShell'
@@ -217,7 +217,7 @@ function SuiteFAQ({ suiteVm, supportEmail }) {
 export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteChange }) {
   const config = usePublicProducts()
   const { add, toggle, has, clear } = useCart()
-  const [introDone, setIntroDone] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches || introSeenInSession())
+  const [introDone, setIntroDone] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches || introSeenForVisitor())
   const finishIntro = useCallback(() => setIntroDone(true), [])
 
   usePageAnimations(introDone)
