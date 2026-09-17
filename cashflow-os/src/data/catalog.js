@@ -856,6 +856,9 @@ export function defaultProductConfig(key) {
     offerLabel: entry.defaultOffer.offerLabel,
     offerActive: entry.defaultOffer.offerActive,
     active: true,
+    status: 'active',
+    waitlistConfig: {},
+    waitlistCount: 0,
     featured: key !== 'invoice-os',
     sortOrder: CATALOG_ORDER.indexOf(key),
     includes: [...entry.pricing.included],
@@ -1219,7 +1222,10 @@ export function buildProductViewModel(key, live = null) {
         ...merged.pricing,
         included: liveDefaults.includes?.length ? liveDefaults.includes : merged.pricing.included,
       },
-      checkoutReady: typeof liveDefaults.checkoutReady === 'boolean' ? liveDefaults.checkoutReady : true,
+      status: liveDefaults.status || 'active',
+      waitlistConfig: liveDefaults.waitlistConfig || {},
+      waitlistCount: Number(liveDefaults.waitlistCount || 0),
+      checkoutReady: typeof liveDefaults.checkoutReady === 'boolean' ? liveDefaults.checkoutReady : (liveDefaults.status !== 'coming_soon'),
       taglineLive: liveDefaults.tagline || '',
     }, live)
   }
@@ -1229,7 +1235,10 @@ export function buildProductViewModel(key, live = null) {
       ...applyContentExtras(mergeContent(entry, liveDefaults?.content || {})),
       offer: { ...entry.defaultOffer },
       pricing: { ...entry.pricing },
-      checkoutReady: true,
+      status: liveDefaults?.status || 'active',
+      waitlistConfig: liveDefaults?.waitlistConfig || {},
+      waitlistCount: Number(liveDefaults?.waitlistCount || 0),
+      checkoutReady: liveDefaults?.status !== 'coming_soon',
       taglineLive: '',
     }
   }
@@ -1241,6 +1250,9 @@ export function buildProductViewModel(key, live = null) {
   return applyUploadedMedia({
     ...fallback,
     offer: { ...fallback.defaultOffer },
-    checkoutReady: typeof fallback.checkoutReady === 'boolean' ? fallback.checkoutReady : Boolean(live?.checkoutReady),
+    status: live?.status || 'active',
+    waitlistConfig: live?.waitlistConfig || {},
+    waitlistCount: Number(live?.waitlistCount || 0),
+    checkoutReady: typeof fallback.checkoutReady === 'boolean' ? fallback.checkoutReady : Boolean(live?.checkoutReady && live?.status !== 'coming_soon'),
   }, live)
 }

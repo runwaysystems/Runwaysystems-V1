@@ -1463,3 +1463,939 @@
 .ops-cell-truncate { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .ops-panel__warning { margin: 10px 0 0; padding: 10px 14px; border: 1px solid rgba(224, 112, 89, .35); border-radius: 10px; background: rgba(224, 112, 89, .08); color: #f0a89a; font-size: 12px; }
 .ops-panel__notice { margin: 10px 0 0; padding: 10px 14px; border: 1px solid rgba(145, 174, 109, .35); border-radius: 10px; background: rgba(145, 174, 109, .08); color: #b7c49d; font-size: 12px; }
+
+/* -------------------------------------------------------------------------
+   Admin Product Status Picker (Active / Coming Soon / Hidden)
+   ------------------------------------------------------------------------- */
+.product-status-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.status-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .02);
+  cursor: pointer;
+  transition: all .2s ease;
+  position: relative;
+}
+
+.status-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.status-option:hover {
+  border-color: rgba(255, 255, 255, .2);
+  background: rgba(255, 255, 255, .04);
+}
+
+.status-option.is-selected {
+  border-color: var(--accent, #c9a227);
+  background: color-mix(in srgb, var(--accent, #c9a227) 8%, rgba(255, 255, 255, .02));
+}
+
+.status-option__indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex: none;
+}
+
+.status-option__indicator.is-active { background: #80c79a; box-shadow: 0 0 8px #80c79a88; }
+.status-option__indicator.is-coming-soon { background: #f0b27a; box-shadow: 0 0 8px #f0b27a88; }
+.status-option__indicator.is-hidden { background: #8c93a0; }
+
+.status-option__content {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.status-option__content b {
+  font-size: 13.5px;
+  color: #f4f1e9;
+}
+
+.status-option__content small {
+  font-size: 11px;
+  color: #a9afba;
+  line-height: 1.45;
+}
+
+@media (max-width: 768px) {
+  .product-status-picker {
+    grid-template-columns: 1fr;
+  }
+}
+
+.status-pill.status-warning {
+  background: rgba(240, 178, 122, .15);
+  border-color: rgba(240, 178, 122, .35);
+  color: #f0b27a;
+}
+
+/* -------------------------------------------------------------------------
+   Admin Waitlist Hub & Broadcast Center
+   ------------------------------------------------------------------------- */
+.admin-settings-group--waitlist {
+  border-color: rgba(201, 162, 39, .25);
+  background: rgba(201, 162, 39, .02);
+}
+
+.waitlist-subgroup {
+  margin-top: 20px;
+  padding: 16px 18px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, .2);
+}
+
+.waitlist-subgroup h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 14.5px;
+  color: #f4f1e9;
+}
+
+.waitlist-admin-hub {
+  margin-top: 24px;
+  padding: 18px 20px;
+  border: 1px solid rgba(201, 162, 39, .28);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, .35);
+}
+
+.waitlist-admin-hub__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.waitlist-admin-hub__header h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 15px;
+  color: #c9a227;
+}
+
+.waitlist-admin-hub__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.waitlist-admin-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.waitlist-stat-card {
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .03);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.waitlist-stat-card span {
+  font-size: 11px;
+  color: #8c93a0;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.waitlist-stat-card strong {
+  font-size: 22px;
+  color: #f4f1e9;
+  font-family: var(--font-display, inherit);
+}
+
+@media (max-width: 640px) {
+  .waitlist-admin-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Feature Demand Poll Progress Bars */
+.waitlist-poll-summary {
+  margin-bottom: 20px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .02);
+}
+
+.waitlist-poll-summary h5 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: #e5e8ed;
+}
+
+.waitlist-poll-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.poll-bar-row__label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin-bottom: 4px;
+  color: #c8ccd4;
+}
+
+.poll-bar-track {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, .08);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.poll-bar-fill {
+  height: 100%;
+  background: #c9a227;
+  border-radius: 999px;
+  transition: width .4s ease;
+}
+
+/* Subscribers Table */
+.waitlist-subscribers-table-wrap {
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 10px;
+  max-height: 280px;
+}
+
+.waitlist-subscribers-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.waitlist-subscribers-table th, .waitlist-subscribers-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, .06);
+  text-align: left;
+}
+
+.source-tag, .poll-tag {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .06);
+  font-size: 10.5px;
+  color: #c8ccd4;
+}
+
+.poll-tag {
+  background: rgba(201, 162, 39, .15);
+  color: #c9a227;
+}
+
+.text-dim {
+  color: #737b89;
+}
+
+/* Broadcast Modal */
+.waitlist-broadcast-modal {
+  max-width: 520px;
+}
+
+.broadcast-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 16px 0 20px;
+  text-align: left;
+}
+
+.broadcast-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* ==========================================================================
+   Email Marketing Hub & Audience Studio
+   ========================================================================== */
+
+.marketing-brevo-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(201, 162, 39, .12);
+  border: 1px solid rgba(201, 162, 39, .3);
+  color: #c9a227;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.marketing-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin: 20px 0 24px;
+}
+
+.marketing-metric-box {
+  background: #11141a;
+  border: 1px solid #242933;
+  border-radius: 12px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.marketing-metric-box.is-highlight {
+  border-color: rgba(163, 230, 53, .4);
+  background: linear-gradient(180deg, rgba(163, 230, 53, .05) 0%, #11141a 100%);
+}
+
+.marketing-metric-box .metric-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: #a9afba;
+}
+
+.marketing-metric-box strong {
+  font-size: 24px;
+  font-weight: 700;
+  color: #f4f1e9;
+  letter-spacing: -0.5px;
+}
+
+.marketing-metric-box small {
+  font-size: 11px;
+  color: #737b89;
+}
+
+.text-gold { color: #c9a227 !important; }
+.text-lime { color: #a3e635 !important; }
+.text-cyan { color: #38bdf8 !important; }
+.text-danger { color: #f87171 !important; }
+
+/* Composer Card */
+.marketing-composer-card {
+  background: #101318;
+  border: 1px solid #242933;
+  border-radius: 14px;
+  padding: 24px;
+  margin-bottom: 28px;
+}
+
+.marketing-composer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #1c212b;
+  margin-bottom: 20px;
+}
+
+.marketing-composer-head h3 {
+  margin: 4px 0 6px;
+  font-size: 19px;
+  color: #f4f1e9;
+}
+
+.marketing-composer-head p {
+  color: #a9afba;
+  font-size: 13px;
+  margin: 0;
+}
+
+.marketing-template-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.template-label {
+  font-size: 12px;
+  color: #737b89;
+  font-weight: 600;
+}
+
+.template-pill-btn {
+  background: rgba(255, 255, 255, .05);
+  border: 1px solid rgba(255, 255, 255, .1);
+  color: #f4f1e9;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+
+.template-pill-btn:hover {
+  background: rgba(201, 162, 39, .15);
+  border-color: rgba(201, 162, 39, .4);
+  color: #c9a227;
+}
+
+.marketing-composer-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 24px;
+}
+
+.marketing-composer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.form-group label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd0d8;
+}
+
+.form-group-row {
+  display: flex;
+  gap: 14px;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  background: #0a0c10;
+  border: 1px solid #2b3039;
+  color: #f4f1e9;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color .15s ease;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  border-color: #c9a227;
+}
+
+.input-with-icon {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-with-icon svg {
+  position: absolute;
+  left: 12px;
+  color: #737b89;
+}
+
+.input-with-icon input {
+  padding-left: 36px;
+  width: 100%;
+}
+
+.label-with-tags {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.token-pills {
+  display: flex;
+  gap: 6px;
+}
+
+.token-pills span {
+  font-size: 10.5px;
+  background: rgba(201, 162, 39, .12);
+  color: #c9a227;
+  padding: 2px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid rgba(201, 162, 39, .25);
+  transition: all .15s ease;
+}
+
+.token-pills span:hover {
+  background: #c9a227;
+  color: #0a0c10;
+}
+
+.marketing-actions-bar {
+  display: flex;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+/* Email Preview Frame */
+.marketing-preview-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.preview-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.preview-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #737b89;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.device-toggle {
+  display: flex;
+  background: #0a0c10;
+  border: 1px solid #242933;
+  border-radius: 7px;
+  padding: 2px;
+}
+
+.device-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: none;
+  color: #737b89;
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+
+.device-toggle button.active {
+  background: #1c212b;
+  color: #f4f1e9;
+  font-weight: 600;
+}
+
+.email-preview-frame {
+  background: #06080a;
+  border: 1px solid #1c212b;
+  border-radius: 12px;
+  padding: 20px 14px;
+  min-height: 480px;
+  display: flex;
+  justify-content: center;
+  transition: max-width .2s ease;
+}
+
+.email-preview-frame.is-mobile {
+  max-width: 360px;
+  margin: 0 auto;
+}
+
+.email-preview-card {
+  background: #11141a;
+  border: 1px solid #242933;
+  border-radius: 14px;
+  padding: 28px 24px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.email-preview-eyebrow {
+  color: #c9a227;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+.email-preview-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #f4f1e9;
+  margin: 0 0 16px 0;
+  line-height: 1.25;
+}
+
+.email-preview-body {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: #cbd0d8;
+  margin-bottom: 20px;
+}
+
+.email-preview-coupon {
+  background: #161922;
+  border: 1px dashed #c9a227;
+  border-radius: 10px;
+  padding: 12px 16px;
+  text-align: center;
+  margin: 16px 0;
+}
+
+.coupon-sub {
+  display: block;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #a9afba;
+  margin-bottom: 4px;
+}
+
+.coupon-code {
+  font-family: monospace;
+  font-size: 16px;
+  font-weight: 700;
+  color: #c9a227;
+  background: #0a0c10;
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid #2b3039;
+}
+
+.email-preview-cta {
+  text-align: center;
+  margin: 20px 0 16px;
+}
+
+.email-cta-btn {
+  display: inline-block;
+  background: #c9a227;
+  color: #0a0c10;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 12px 24px;
+  border-radius: 8px;
+  letter-spacing: 0.2px;
+}
+
+.email-preview-footer {
+  border-top: 1px solid #1c212b;
+  padding-top: 18px;
+  margin-top: 20px;
+  font-size: 11px;
+  color: #737b89;
+  line-height: 1.5;
+}
+
+.unsubscribe-line {
+  margin-top: 4px;
+}
+
+.unsub-link {
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* Audience Section */
+.marketing-audience-section {
+  background: #101318;
+  border: 1px solid #242933;
+  border-radius: 14px;
+  padding: 24px;
+}
+
+.audience-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.segment-filter-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filter-tab {
+  background: #0a0c10;
+  border: 1px solid #242933;
+  color: #a9afba;
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+
+.filter-tab:hover {
+  border-color: #3f4553;
+  color: #f4f1e9;
+}
+
+.filter-tab.active {
+  background: rgba(201, 162, 39, .15);
+  border-color: #c9a227;
+  color: #c9a227;
+  font-weight: 600;
+}
+
+.audience-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.audience-search-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.audience-search-box svg {
+  position: absolute;
+  left: 10px;
+  color: #737b89;
+}
+
+.audience-search-box input {
+  background: #0a0c10;
+  border: 1px solid #2b3039;
+  border-radius: 8px;
+  padding: 7px 28px 7px 30px;
+  font-size: 12.5px;
+  color: #f4f1e9;
+  outline: none;
+  width: 200px;
+}
+
+.audience-search-box input:focus {
+  border-color: #c9a227;
+}
+
+.audience-search-box button {
+  position: absolute;
+  right: 8px;
+  background: transparent;
+  border: none;
+  color: #737b89;
+  cursor: pointer;
+}
+
+/* Contacts Table */
+.contact-identity-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.contact-avatar-img {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid #2b3039;
+}
+
+.contact-avatar-fallback {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #1c212b;
+  border: 1px solid #2b3039;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #c9a227;
+}
+
+.contact-email-line {
+  display: block;
+  font-size: 11px;
+  color: #737b89;
+}
+
+.audience-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.audience-badge.is-customer {
+  background: rgba(201, 162, 39, .15);
+  color: #c9a227;
+  border: 1px solid rgba(201, 162, 39, .3);
+}
+
+.audience-badge.is-lead {
+  background: rgba(163, 230, 53, .12);
+  color: #a3e635;
+  border: 1px solid rgba(163, 230, 53, .25);
+}
+
+.product-pills-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.product-pill {
+  font-size: 10.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.product-pill.owned {
+  background: rgba(201, 162, 39, .12);
+  color: #c9a227;
+  border: 1px solid rgba(201, 162, 39, .25);
+}
+
+.product-pill.waitlist {
+  background: rgba(56, 189, 248, .12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, .25);
+}
+
+.table-row-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.action-icon-btn {
+  background: #0a0c10;
+  border: 1px solid #242933;
+  color: #a9afba;
+  padding: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all .15s ease;
+}
+
+.action-icon-btn:hover {
+  background: #1c212b;
+  color: #f4f1e9;
+  border-color: #3f4553;
+}
+
+/* Marketing History */
+.marketing-history-section {
+  background: #101318;
+  border: 1px solid #242933;
+  border-radius: 14px;
+  padding: 24px;
+  margin-top: 24px;
+}
+
+.section-subtitle {
+  margin-bottom: 16px;
+}
+
+.section-subtitle h4 {
+  margin: 4px 0 0;
+  font-size: 16px;
+  color: #f4f1e9;
+}
+
+/* Modals */
+.broadcast-summary-callout {
+  display: flex;
+  gap: 12px;
+  background: rgba(201, 162, 39, .08);
+  border: 1px solid rgba(201, 162, 39, .25);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 18px;
+}
+
+.broadcast-summary-callout strong {
+  display: block;
+  font-size: 14px;
+  color: #f4f1e9;
+  margin-bottom: 4px;
+}
+
+.broadcast-summary-callout p {
+  margin: 0;
+  font-size: 13px;
+  color: #cbd0d8;
+  line-height: 1.5;
+}
+
+.broadcast-details-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #0a0c10;
+  border: 1px solid #1c212b;
+  border-radius: 8px;
+  padding: 14px;
+  font-size: 12.5px;
+  margin-bottom: 20px;
+}
+
+.broadcast-details-list div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.broadcast-details-list span {
+  color: #737b89;
+}
+
+@media (max-width: 960px) {
+  .marketing-composer-grid {
+    grid-template-columns: 1fr;
+  }
+  .form-group-row {
+    flex-direction: column;
+  }
+}
+
+

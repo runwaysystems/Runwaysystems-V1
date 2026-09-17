@@ -119,6 +119,8 @@ function ProductCard({ viewModel, inCart, onToggleCart }) {
   const quickY = useRef(null)
   const Icon = sectionIcon(viewModel.icon)
   const offer = viewModel.offer
+  const isComingSoon = viewModel.status === 'coming_soon'
+  const timeline = viewModel.waitlistConfig?.launchTimeline || 'Coming Soon'
 
   // GSAP tilt via quickTo: one reusable tween per axis instead of spawning
   // a new tween on every pointermove, so hover stays silky on long catalogs.
@@ -165,7 +167,7 @@ function ProductCard({ viewModel, inCart, onToggleCart }) {
 
   return (
     <Link
-      className={`product-card product-card--${viewModel.accent} reveal`}
+      className={`product-card product-card--${viewModel.accent} ${isComingSoon ? 'is-coming-soon' : ''} reveal`}
       to={`/products/${viewModel.key}`}
       ref={cardRef}
       onPointerEnter={enterCard}
@@ -173,29 +175,47 @@ function ProductCard({ viewModel, inCart, onToggleCart }) {
       onPointerLeave={resetCard}
       onPointerCancel={resetCard}
     >
-      <button
-        className={cx('product-card__add', inCart && 'is-added')}
-        type="button"
-        aria-label={inCart ? `Remove ${viewModel.name} from cart` : `Add ${viewModel.name} to cart`}
-        aria-pressed={inCart}
-        onClick={(event) => {
-          event.preventDefault()
-          event.stopPropagation()
-          onToggleCart(viewModel.key)
-        }}
-      >
-        {inCart ? <><Check size={13} /> In cart</> : <><Plus size={13} /> Add</>}
-      </button>
+      {isComingSoon ? (
+        <span className="product-card__status-tag">
+          <Sparkles size={12} /> Coming soon
+        </span>
+      ) : (
+        <button
+          className={cx('product-card__add', inCart && 'is-added')}
+          type="button"
+          aria-label={inCart ? `Remove ${viewModel.name} from cart` : `Add ${viewModel.name} to cart`}
+          aria-pressed={inCart}
+          onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onToggleCart(viewModel.key)
+          }}
+        >
+          {inCart ? <><Check size={13} /> In cart</> : <><Plus size={13} /> Add</>}
+        </button>
+      )}
       <span className="product-card__icon"><Icon /></span>
       <span className="product-card__category">{viewModel.category}</span>
       <h3>{viewModel.name}</h3>
       <p>{viewModel.taglineLive || viewModel.hero?.lede || ''}</p>
       <div className="product-card__price">
-        {offer.offerActive && <s>{offer.displayOriginalPrice}</s>}
-        <strong>{offer.displaySalePrice}</strong>
-        <span>one-time</span>
+        {isComingSoon ? (
+          <>
+            <span className="product-card__launch-tag">{timeline}</span>
+            <strong>Pre-launch</strong>
+            <span>Get notified</span>
+          </>
+        ) : (
+          <>
+            {offer.offerActive && <s>{offer.displayOriginalPrice}</s>}
+            <strong>{offer.displaySalePrice}</strong>
+            <span>one-time</span>
+          </>
+        )}
       </div>
-      <span className="product-card__cta">View product <ArrowUpRight size={15} /></span>
+      <span className="product-card__cta">
+        {isComingSoon ? 'Get notified' : 'View product'} <ArrowUpRight size={15} />
+      </span>
     </Link>
   )
 }
@@ -277,11 +297,22 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
     }
   }, [config, suiteVm.proof, viewModels])
 
-  const bundleTotal = viewModels.reduce((sum, product) => sum + priceNumber(product.offer?.displaySalePrice), 0)
+  const [filter, setFilter] = useState('all')
+  const availableCount = useMemo(() => viewModels.filter((p) => p.status !== 'coming_soon').length, [viewModels])
+  const comingSoonCount = useMemo(() => viewModels.filter((p) => p.status === 'coming_soon').length, [viewModels])
+  const filteredViewModels = useMemo(() => {
+    if (filter === 'available') return viewModels.filter((p) => p.status !== 'coming_soon')
+    if (filter === 'coming_soon') return viewModels.filter((p) => p.status === 'coming_soon')
+    return viewModels
+  }, [viewModels, filter])
+
+  const bundleTotal = viewModels.filter((p) => p.status !== 'coming_soon').reduce((sum, product) => sum + priceNumber(product.offer?.displaySalePrice), 0)
   const cartHas = (key) => has(key)
   const toggleCart = (key) => toggle(key)
   const addCompleteSuite = () => {
-    for (const product of viewModels) add(product.key)
+    for (const product of viewModels) {
+      if (product.status !== 'coming_soon') add(product.key)
+    }
   }
 
   const bundles = useMemo(() => config?.bundles || [], [config])
@@ -343,7 +374,7 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
             {/* Hiding every product is a valid state (a store between launches),
                 so the suite banner and its $0.00 total are suppressed rather
                 than advertising an empty bundle. */}
-            {viewModels.length > 1 && (
+            {availableCount > 1 && (
               <div className="suite-bundle-banner reveal">
                 <div className="suite-bundle-banner__copy">
                   <p className="eyebrow">{suiteVm.bundle.eyebrow}</p>
@@ -387,9 +418,36 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
                 ))}
               </div>
             )}
-            {viewModels.length > 0 ? (
+
+            {comingSoonCount > 0 && (
+              <div className="catalog-filter-tabs reveal">
+                <button
+                  type="button"
+                  className={cx('catalog-filter-btn', filter === 'all' && 'is-active')}
+                  onClick={() => setFilter('all')}
+                >
+                  All products ({viewModels.length})
+                </button>
+                <button
+                  type="button"
+                  className={cx('catalog-filter-btn', filter === 'available' && 'is-active')}
+                  onClick={() => setFilter('available')}
+                >
+                  Available now ({availableCount})
+                </button>
+                <button
+                  type="button"
+                  className={cx('catalog-filter-btn', filter === 'coming_soon' && 'is-active')}
+                  onClick={() => setFilter('coming_soon')}
+                >
+                  Coming soon ({comingSoonCount})
+                </button>
+              </div>
+            )}
+
+            {filteredViewModels.length > 0 ? (
               <div className="products-grid">
-                {viewModels.map((product) => (
+                {filteredViewModels.map((product) => (
                   <ProductCard
                     viewModel={product}
                     key={product.key}
@@ -400,7 +458,7 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
               </div>
             ) : (
               <p className="catalog-empty reveal">
-                No products are on sale right now. Check back soon.
+                No products match this filter right now. Check back soon.
               </p>
             )}
           </div>

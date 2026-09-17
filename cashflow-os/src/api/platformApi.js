@@ -105,6 +105,138 @@ const defaultIntegrations = [
   { id: 'ai', label: 'AI image scanning', status: 'setup', detail: 'Auto-writes feature headings and subheadings when configured on the Worker' },
 ]
 
+const seedAudienceContacts = [
+  {
+    id: 'contact-01',
+    email: 'elena.rostova@venturecap.io',
+    userId: 'usr-elena-01',
+    name: 'Elena Rostova',
+    avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80',
+    source: 'google_signin',
+    status: 'subscribed',
+    isCustomer: false,
+    totalSpendCents: 0,
+    ordersCount: 0,
+    productsOwned: [],
+    waitlistsJoined: ['invoice-os'],
+    lastSeenAt: '2026-09-16T14:20:00Z',
+    createdAt: '2026-09-12T09:15:00Z',
+  },
+  {
+    id: 'contact-02',
+    email: 'jordan.hayes@apexventures.co',
+    userId: 'usr-jordan-02',
+    name: 'Jordan Hayes',
+    avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=120&auto=format&fit=crop&q=80',
+    source: 'checkout',
+    status: 'subscribed',
+    isCustomer: true,
+    totalSpendCents: 3900,
+    ordersCount: 1,
+    productsOwned: ['cashflow-os'],
+    waitlistsJoined: [],
+    lastSeenAt: '2026-09-17T08:10:00Z',
+    createdAt: '2026-09-05T11:30:00Z',
+  },
+  {
+    id: 'contact-03',
+    email: 'sarah.lindqvist@nordicscale.io',
+    userId: 'usr-sarah-03',
+    name: 'Sarah Lindqvist',
+    avatarUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=120&auto=format&fit=crop&q=80',
+    source: 'checkout',
+    status: 'subscribed',
+    isCustomer: true,
+    totalSpendCents: 9800,
+    ordersCount: 2,
+    productsOwned: ['cashflow-os', 'client-crm-os'],
+    waitlistsJoined: ['invoice-os'],
+    lastSeenAt: '2026-09-17T10:05:00Z',
+    createdAt: '2026-08-28T16:45:00Z',
+  },
+  {
+    id: 'contact-04',
+    email: 'marcus.vance@solocreator.co',
+    userId: 'usr-marcus-04',
+    name: 'Marcus Vance',
+    avatarUrl: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=120&auto=format&fit=crop&q=80',
+    source: 'google_signin',
+    status: 'subscribed',
+    isCustomer: false,
+    totalSpendCents: 0,
+    ordersCount: 0,
+    productsOwned: [],
+    waitlistsJoined: [],
+    lastSeenAt: '2026-09-15T18:40:00Z',
+    createdAt: '2026-09-14T20:10:00Z',
+  },
+  {
+    id: 'contact-05',
+    email: 'priya.patel@growthpulse.agency',
+    userId: 'usr-priya-05',
+    name: 'Priya Patel',
+    avatarUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=120&auto=format&fit=crop&q=80',
+    source: 'waitlist',
+    status: 'subscribed',
+    isCustomer: false,
+    totalSpendCents: 0,
+    ordersCount: 0,
+    productsOwned: [],
+    waitlistsJoined: ['invoice-os'],
+    lastSeenAt: '2026-09-16T11:00:00Z',
+    createdAt: '2026-09-16T11:00:00Z',
+  },
+  {
+    id: 'contact-06',
+    email: 'carlos.mendez@solofounder.dev',
+    userId: 'usr-carlos-06',
+    name: 'Carlos Mendez',
+    avatarUrl: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=120&auto=format&fit=crop&q=80',
+    source: 'checkout',
+    status: 'subscribed',
+    isCustomer: true,
+    totalSpendCents: 4900,
+    ordersCount: 1,
+    productsOwned: ['project-os'],
+    waitlistsJoined: [],
+    lastSeenAt: '2026-09-10T09:12:00Z',
+    createdAt: '2026-09-02T13:20:00Z',
+  },
+  {
+    id: 'contact-07',
+    email: 'david.kim@saasvelocity.net',
+    userId: 'usr-david-07',
+    name: 'David Kim',
+    avatarUrl: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=120&auto=format&fit=crop&q=80',
+    source: 'google_signin',
+    status: 'subscribed',
+    isCustomer: false,
+    totalSpendCents: 0,
+    ordersCount: 0,
+    productsOwned: [],
+    waitlistsJoined: [],
+    lastSeenAt: '2026-09-17T07:30:00Z',
+    createdAt: '2026-09-15T15:25:00Z',
+  },
+]
+
+const seedMarketingCampaigns = [
+  {
+    id: 'camp-01',
+    title: 'Cash Flow OS 2.0 Launch Broadcast',
+    subject: 'Cash Flow OS 2.0 is officially live on Runway Systems',
+    previewText: 'RUNWAY SYSTEMS · VIP LAUNCH',
+    targetSegment: 'all',
+    targetProductKey: 'cashflow-os',
+    ctaLabel: 'Get Instant Access →',
+    ctaUrl: 'https://runwaysystems.cloud/products/cashflow-os',
+    discountCode: 'VIP20',
+    recipientCount: 148,
+    sentBy: 'runwaysystems.cloud@gmail.com',
+    sentAt: '2026-09-10T15:00:00Z',
+  },
+]
+
 const clone = (value) => JSON.parse(JSON.stringify(value))
 const wait = (ms = 180) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const makeId = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -116,6 +248,8 @@ function emptyState() {
     settings: clone(defaultSettings),
     products: [],
     bundles: [],
+    audienceContacts: clone(seedAudienceContacts),
+    marketingCampaigns: clone(seedMarketingCampaigns),
   }
 }
 
@@ -126,33 +260,65 @@ function emptyState() {
 function mockAllProducts(state) {
   const defaults = defaultProducts()
   const overrides = new Map((state.products || []).map((product) => [product.key, product]))
+  const waitlistCounts = new Map()
+  for (const w of state.waitlist || []) {
+    waitlistCounts.set(w.productKey, (waitlistCounts.get(w.productKey) || 0) + 1)
+  }
+
   const merged = defaults.map((product) => {
     const saved = overrides.get(product.key)
-    if (saved) return { ...product, ...saved }
-    if (product.key === 'cashflow-os') {
-      return {
-        ...product,
-        offerActive: Boolean(state.settings.offerActive),
-        offerLabel: state.settings.offerLabel,
-        originalPrice: state.settings.displayOriginalPrice,
-        salePrice: state.settings.displaySalePrice,
-      }
+    const base = saved ? { ...product, ...saved } : (product.key === 'cashflow-os' ? {
+      ...product,
+      offerActive: Boolean(state.settings.offerActive),
+      offerLabel: state.settings.offerLabel,
+      originalPrice: state.settings.displayOriginalPrice,
+      salePrice: state.settings.displaySalePrice,
+    } : product)
+
+    const active = base.active === false ? false : (base.status === 'hidden' ? false : true)
+    const status = base.status ? (base.active === false ? 'hidden' : base.status) : (active ? 'active' : 'hidden')
+    const waitlistConfig = base.waitlistConfig || {}
+    const rawCount = waitlistCounts.get(base.key) || 0
+    const offset = Number(waitlistConfig.socialProofOffset) || 0
+    const waitlistCount = rawCount + (waitlistConfig.showSocialProof ? offset : 0)
+
+    return {
+      ...base,
+      status,
+      active,
+      waitlistConfig,
+      waitlistCount,
+      checkoutReady: Boolean(base.lemonVariantId && base.lemonVariantId !== '' && status !== 'coming_soon'),
     }
-    return product
   })
   // Owner-created products that are not part of the built-in catalog still
   // belong in the list.
   for (const saved of state.products || []) {
-    if (!defaults.some((product) => product.key === saved.key)) merged.push({ ...saved })
+    if (!defaults.some((product) => product.key === saved.key)) {
+      const active = saved.active === false ? false : (saved.status === 'hidden' ? false : true)
+      const status = saved.status ? (saved.active === false ? 'hidden' : saved.status) : (active ? 'active' : 'hidden')
+      const waitlistConfig = saved.waitlistConfig || {}
+      const rawCount = waitlistCounts.get(saved.key) || 0
+      const offset = Number(waitlistConfig.socialProofOffset) || 0
+      const waitlistCount = rawCount + (waitlistConfig.showSocialProof ? offset : 0)
+      merged.push({
+        ...saved,
+        status,
+        active,
+        waitlistConfig,
+        waitlistCount,
+        checkoutReady: Boolean(saved.lemonVariantId && saved.lemonVariantId !== '' && status !== 'coming_soon'),
+      })
+    }
   }
   return dedupeProducts(merged)
 }
 
-// The public, storefront-facing list. The Worker serves `WHERE active = 1`;
+// The public, storefront-facing list. The Worker serves `WHERE active = 1 AND status != 'hidden'`;
 // the preview adapter has to apply the same rule or a product hidden in the
 // dashboard keeps showing locally.
 function mockProducts(state) {
-  return mockAllProducts(state).filter((product) => product.active !== false)
+  return mockAllProducts(state).filter((product) => product.active !== false && product.status !== 'hidden')
 }
 
 // Two products that render as the same card (same key, or the same display
@@ -778,3 +944,445 @@ export async function retryDeliveryIssue(purchaseId, { token } = {}) {
   await wait()
   return { retried: true, purchaseId }
 }
+
+export async function subscribeWaitlist(productKey, { email, userId = '', source = 'product_page' } = {}) {
+  if (API_BASE_URL) {
+    return request('/waitlist/subscribe', {
+      method: 'POST',
+      body: { productKey, email, userId, source },
+    })
+  }
+  await wait(200)
+  const state = readMockState()
+  const waitlist = state.waitlist || []
+  const cleanEmail = String(email || '').trim().toLowerCase()
+  const existing = waitlist.find((w) => w.productKey === productKey && w.email === cleanEmail)
+  if (!existing) {
+    waitlist.push({
+      id: `wl-${Date.now()}`,
+      productKey,
+      email: cleanEmail,
+      userId,
+      source,
+      pollResponse: '',
+      welcomeSentAt: new Date().toISOString(),
+      notifiedAt: null,
+      createdAt: new Date().toISOString(),
+    })
+    writeMockState({ ...state, waitlist })
+  }
+  const product = (mockAllProducts(state) || []).find((p) => p.key === productKey)
+  const pollConfig = product?.waitlistConfig?.pollEnabled ? {
+    question: product.waitlistConfig.pollQuestion || 'Which feature is most critical for your business?',
+    options: Array.isArray(product.waitlistConfig.pollOptions) && product.waitlistConfig.pollOptions.length
+      ? product.waitlistConfig.pollOptions
+      : ['Automated dashboard summaries', 'Multi-currency support', 'Tax reserve forecasting', 'Client retainer tracking'],
+  } : null
+  return {
+    ok: true,
+    message: "You're on the early access list! We will notify you when it launches.",
+    poll: pollConfig,
+  }
+}
+
+export async function voteWaitlistPoll(productKey, { email, vote } = {}) {
+  if (API_BASE_URL) {
+    return request('/waitlist/poll-vote', {
+      method: 'POST',
+      body: { productKey, email, vote },
+    })
+  }
+  await wait(150)
+  const state = readMockState()
+  const waitlist = (state.waitlist || []).map((item) => {
+    if (item.productKey === productKey && item.email === String(email || '').toLowerCase().trim()) {
+      return { ...item, pollResponse: vote }
+    }
+    return item
+  })
+  writeMockState({ ...state, waitlist })
+  return { ok: true, message: 'Thank you for your feedback!' }
+}
+
+export async function getAdminProductWaitlist(productKey, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    return request(`/admin/products/${encodeURIComponent(productKey)}/waitlist`, { token, totp })
+  }
+  await wait(150)
+  const state = readMockState()
+  const list = (state.waitlist || []).filter((w) => w.productKey === productKey)
+  const pollMap = new Map()
+  for (const item of list) {
+    if (item.pollResponse) {
+      pollMap.set(item.pollResponse, (pollMap.get(item.pollResponse) || 0) + 1)
+    }
+  }
+  return {
+    totalSubscribers: list.length,
+    notifiedCount: list.filter((w) => w.notifiedAt).length,
+    welcomeSentCount: list.filter((w) => w.welcomeSentAt).length,
+    pollResults: Array.from(pollMap.entries()).map(([option, count]) => ({ option, count })),
+    subscribers: list.map((w) => ({
+      id: w.id,
+      email: w.email,
+      source: w.source,
+      pollResponse: w.pollResponse || '',
+      welcomeSentAt: w.welcomeSentAt,
+      notifiedAt: w.notifiedAt,
+      createdAt: w.createdAt,
+    })),
+  }
+}
+
+export async function exportAdminProductWaitlist(productKey, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    const url = `${API_BASE_URL}/admin/products/${encodeURIComponent(productKey)}/waitlist/export`
+    const activeTotp = !totp ? getActiveAdminTotp() : ''
+    const response = await fetch(url, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(activeTotp ? { 'X-Admin-TOTP': activeTotp } : {}),
+        ...(totp ? { 'X-Admin-TOTP': totp } : {}),
+      },
+    })
+    if (!response.ok) throw new Error('Failed to export waitlist')
+    return response.text()
+  }
+  await wait(100)
+  const state = readMockState()
+  const list = (state.waitlist || []).filter((w) => w.productKey === productKey)
+  const escapeCsv = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`
+  const lines = ['Email,Source,Poll Response,Welcome Sent At,Notified At,Signed Up At']
+  for (const r of list) {
+    lines.push([
+      escapeCsv(r.email),
+      escapeCsv(r.source),
+      escapeCsv(r.pollResponse),
+      escapeCsv(r.welcomeSentAt),
+      escapeCsv(r.notifiedAt),
+      escapeCsv(r.createdAt),
+    ].join(','))
+  }
+  return lines.join('\n')
+}
+
+export async function sendTestWaitlistEmail(productKey, { subject = '', message = '' } = {}, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    return request(`/admin/products/${encodeURIComponent(productKey)}/waitlist/test-email`, {
+      method: 'POST',
+      token,
+      totp,
+      body: { subject, message },
+    })
+  }
+  await wait(300)
+  return { ok: true, message: 'Test email simulated successfully.' }
+}
+
+export async function broadcastLaunchEmail(productKey, { subject = '', message = '' } = {}, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    return request(`/admin/products/${encodeURIComponent(productKey)}/waitlist/broadcast`, {
+      method: 'POST',
+      token,
+      totp,
+      body: { subject, message },
+    })
+  }
+  await wait(400)
+  const state = readMockState()
+  let sentCount = 0
+  const now = new Date().toISOString()
+  const waitlist = (state.waitlist || []).map((item) => {
+    if (item.productKey === productKey && !item.notifiedAt) {
+      sentCount += 1
+      return { ...item, notifiedAt: now }
+    }
+    return item
+  })
+  writeMockState({ ...state, waitlist })
+  return {
+    ok: true,
+    sentCount,
+    totalQueued: sentCount,
+    message: `Broadcast complete: sent to ${sentCount} subscribers.`,
+  }
+}
+
+export async function syncAudienceContact(user, { token } = {}) {
+  if (!user || !user.email) return { ok: true }
+  if (API_BASE_URL) {
+    return request('/account/sync', {
+      method: 'POST',
+      token,
+      body: {
+        email: user.email,
+        userId: user.id || '',
+        name: user.user_metadata?.full_name || user.user_metadata?.name || '',
+        avatarUrl: user.user_metadata?.avatar_url || user.user_metadata?.picture || '',
+      },
+    }).catch(() => ({ ok: true }))
+  }
+  const state = readMockState()
+  const email = String(user.email).toLowerCase().trim()
+  const contacts = state.audienceContacts || clone(seedAudienceContacts)
+  const existing = contacts.find((c) => c.email === email)
+  const now = new Date().toISOString()
+  if (existing) {
+    existing.lastSeenAt = now
+    if (user.user_metadata?.full_name && !existing.name) existing.name = user.user_metadata.full_name
+    if (user.user_metadata?.avatar_url && !existing.avatarUrl) existing.avatarUrl = user.user_metadata.avatar_url
+  } else {
+    contacts.unshift({
+      id: `contact-${Date.now()}`,
+      email,
+      userId: user.id || '',
+      name: user.user_metadata?.full_name || user.user_metadata?.name || '',
+      avatarUrl: user.user_metadata?.avatar_url || user.user_metadata?.picture || '',
+      source: 'google_signin',
+      status: 'subscribed',
+      isCustomer: false,
+      totalSpendCents: 0,
+      ordersCount: 0,
+      productsOwned: [],
+      waitlistsJoined: [],
+      lastSeenAt: now,
+      createdAt: now,
+    })
+  }
+  writeMockState({ ...state, audienceContacts: contacts })
+  return { ok: true }
+}
+
+export async function getAdminAudience({ segment = 'all', search = '', product = '', page = 1, limit = 50 } = {}, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    const params = new URLSearchParams()
+    if (segment && segment !== 'all') params.set('segment', segment)
+    if (search) params.set('search', search)
+    if (product) params.set('product', product)
+    if (page) params.set('page', String(page))
+    if (limit) params.set('limit', String(limit))
+    const query = params.toString() ? `?${params.toString()}` : ''
+    return request(`/admin/marketing/audience${query}`, { token, totp })
+  }
+  await wait(180)
+  const state = readMockState()
+  let list = state.audienceContacts || clone(seedAudienceContacts)
+
+  const stats = {
+    total: list.length,
+    leads: list.filter((c) => !c.isCustomer && c.status === 'subscribed').length,
+    customers: list.filter((c) => c.isCustomer).length,
+    waitlist: list.filter((c) => Array.isArray(c.waitlistsJoined) && c.waitlistsJoined.length > 0).length,
+    unsubscribed: list.filter((c) => c.status === 'unsubscribed').length,
+    totalLtvCents: list.reduce((sum, c) => sum + (c.totalSpendCents || 0), 0),
+  }
+
+  if (segment === 'leads') {
+    list = list.filter((c) => !c.isCustomer && c.status === 'subscribed')
+  } else if (segment === 'customers') {
+    list = list.filter((c) => c.isCustomer)
+  } else if (segment === 'waitlist') {
+    list = list.filter((c) => Array.isArray(c.waitlistsJoined) && c.waitlistsJoined.length > 0)
+  } else if (segment === 'unsubscribed') {
+    list = list.filter((c) => c.status === 'unsubscribed')
+  }
+
+  if (search) {
+    const term = search.toLowerCase()
+    list = list.filter((c) => c.email.toLowerCase().includes(term) || (c.name || '').toLowerCase().includes(term))
+  }
+
+  if (product) {
+    list = list.filter((c) =>
+      (Array.isArray(c.productsOwned) && c.productsOwned.includes(product)) ||
+      (Array.isArray(c.waitlistsJoined) && c.waitlistsJoined.includes(product))
+    )
+  }
+
+  const total = list.length
+  const offset = (page - 1) * limit
+  const paginated = list.slice(offset, offset + limit)
+
+  return {
+    stats,
+    contacts: paginated,
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit) || 1,
+  }
+}
+
+export async function exportAdminAudienceCsv({ segment = 'all' } = {}, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    const url = `${API_BASE_URL}/admin/marketing/audience/export?segment=${encodeURIComponent(segment)}`
+    const activeTotp = !totp ? getActiveAdminTotp() : ''
+    const response = await fetch(url, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(activeTotp ? { 'X-Admin-TOTP': activeTotp } : {}),
+        ...(totp ? { 'X-Admin-TOTP': totp } : {}),
+      },
+    })
+    if (!response.ok) throw new Error('Failed to export audience CSV')
+    return response.text()
+  }
+  await wait(150)
+  const state = readMockState()
+  let list = state.audienceContacts || clone(seedAudienceContacts)
+  if (segment === 'leads') list = list.filter((c) => !c.isCustomer && c.status === 'subscribed')
+  else if (segment === 'customers') list = list.filter((c) => c.isCustomer)
+  else if (segment === 'waitlist') list = list.filter((c) => Array.isArray(c.waitlistsJoined) && c.waitlistsJoined.length > 0)
+  else if (segment === 'unsubscribed') list = list.filter((c) => c.status === 'unsubscribed')
+
+  const escapeCsv = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`
+  const lines = ['Email,Name,Source,Status,Segment,Total Spend (USD),Orders Count,Products Owned,Waitlists,Joined At,Last Seen At']
+  for (const r of list) {
+    const owned = (r.productsOwned || []).join('; ')
+    const waitlists = (r.waitlistsJoined || []).join('; ')
+    const spend = ((r.totalSpendCents || 0) / 100).toFixed(2)
+    const seg = r.isCustomer ? 'Customer' : 'Lead'
+    lines.push([
+      escapeCsv(r.email),
+      escapeCsv(r.name),
+      escapeCsv(r.source),
+      escapeCsv(r.status),
+      escapeCsv(seg),
+      escapeCsv(`$${spend}`),
+      escapeCsv(r.ordersCount || 0),
+      escapeCsv(owned),
+      escapeCsv(waitlists),
+      escapeCsv(r.createdAt),
+      escapeCsv(r.lastSeenAt),
+    ].join(','))
+  }
+  return lines.join('\n')
+}
+
+export async function createAdminAudienceContact(contactData, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    return request('/admin/marketing/contacts', { method: 'POST', body: contactData, token, totp })
+  }
+  await wait(200)
+  const state = readMockState()
+  const email = String(contactData.email || '').trim().toLowerCase()
+  const contacts = state.audienceContacts || clone(seedAudienceContacts)
+  const now = new Date().toISOString()
+  const contact = {
+    id: `contact-${Date.now()}`,
+    email,
+    name: contactData.name || '',
+    source: contactData.source || 'manual',
+    status: 'subscribed',
+    isCustomer: false,
+    totalSpendCents: 0,
+    ordersCount: 0,
+    productsOwned: [],
+    waitlistsJoined: [],
+    lastSeenAt: now,
+    createdAt: now,
+  }
+  contacts.unshift(contact)
+  writeMockState({ ...state, audienceContacts: contacts })
+  return { ok: true, contact }
+}
+
+export async function updateAdminAudienceContact(id, updates, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    return request(`/admin/marketing/contacts/${encodeURIComponent(id)}`, { method: 'PATCH', body: updates, token, totp })
+  }
+  await wait(180)
+  const state = readMockState()
+  const contacts = (state.audienceContacts || clone(seedAudienceContacts)).map((c) => {
+    if (c.id === id) return { ...c, ...updates }
+    return c
+  })
+  writeMockState({ ...state, audienceContacts: contacts })
+  return { ok: true }
+}
+
+export async function deleteAdminAudienceContact(id, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    return request(`/admin/marketing/contacts/${encodeURIComponent(id)}`, { method: 'DELETE', token, totp })
+  }
+  await wait(180)
+  const state = readMockState()
+  const contacts = (state.audienceContacts || clone(seedAudienceContacts)).filter((c) => c.id !== id)
+  writeMockState({ ...state, audienceContacts: contacts })
+  return { ok: true }
+}
+
+export async function getAdminMarketingCampaigns({ token, totp } = {}) {
+  if (API_BASE_URL) {
+    return request('/admin/marketing/campaigns', { token, totp })
+  }
+  await wait(150)
+  const state = readMockState()
+  return state.marketingCampaigns || clone(seedMarketingCampaigns)
+}
+
+export async function sendAdminMarketingTestEmail(campaignData, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    return request('/admin/marketing/campaigns/test', { method: 'POST', body: campaignData, token, totp })
+  }
+  await wait(350)
+  return { ok: true, message: 'Test email successfully simulated to owner inbox.' }
+}
+
+export async function broadcastAdminMarketingCampaign(campaignData, { token, totp } = {}) {
+  if (API_BASE_URL) {
+    return request('/admin/marketing/campaigns/broadcast', { method: 'POST', body: campaignData, token, totp })
+  }
+  await wait(450)
+  const state = readMockState()
+  const contacts = state.audienceContacts || clone(seedAudienceContacts)
+  let eligible = contacts.filter((c) => c.status === 'subscribed')
+  if (campaignData.targetSegment === 'leads') eligible = eligible.filter((c) => !c.isCustomer)
+  else if (campaignData.targetSegment === 'customers') eligible = eligible.filter((c) => c.isCustomer)
+  else if (campaignData.targetSegment === 'waitlist') {
+    if (campaignData.targetProductKey) eligible = eligible.filter((c) => (c.waitlistsJoined || []).includes(campaignData.targetProductKey))
+    else eligible = eligible.filter((c) => (c.waitlistsJoined || []).length > 0)
+  }
+
+  const campaign = {
+    id: `camp-${Date.now()}`,
+    title: campaignData.title || campaignData.subject,
+    subject: campaignData.subject,
+    previewText: campaignData.eyebrow || 'RUNWAY SYSTEMS · VIP ANNOUNCEMENT',
+    targetSegment: campaignData.targetSegment || 'all',
+    targetProductKey: campaignData.targetProductKey || '',
+    ctaLabel: campaignData.ctaLabel || '',
+    ctaUrl: campaignData.ctaUrl || '',
+    discountCode: campaignData.discountCode || '',
+    recipientCount: eligible.length,
+    sentBy: 'runwaysystems.cloud@gmail.com',
+    sentAt: new Date().toISOString(),
+  }
+
+  const campaigns = [campaign, ...(state.marketingCampaigns || clone(seedMarketingCampaigns))]
+  writeMockState({ ...state, marketingCampaigns: campaigns })
+  return {
+    ok: true,
+    campaignId: campaign.id,
+    sentCount: eligible.length,
+    totalQueued: eligible.length,
+    message: `Campaign broadcast dispatched to ${eligible.length} recipients via Brevo.`,
+  }
+}
+
+export async function unsubscribeMarketingContact({ email } = {}) {
+  if (API_BASE_URL) {
+    return request('/marketing/unsubscribe', { method: 'POST', body: { email } })
+  }
+  await wait(150)
+  const state = readMockState()
+  const clean = String(email || '').toLowerCase().trim()
+  const contacts = (state.audienceContacts || clone(seedAudienceContacts)).map((c) => {
+    if (c.email.toLowerCase() === clean) return { ...c, status: 'unsubscribed' }
+    return c
+  })
+  writeMockState({ ...state, audienceContacts: contacts })
+  return { ok: true }
+}
+
+

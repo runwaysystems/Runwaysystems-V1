@@ -43,6 +43,8 @@ import {
   Zap,
 } from 'lucide-react'
 import ProductMockVisual from './ProductMockVisual'
+import { subscribeWaitlist, voteWaitlistPoll } from '../api/platformApi'
+import { useAuth } from '../context/AuthContext'
 
 const cx = (...classes) => classes.filter(Boolean).join(' ')
 
@@ -346,8 +348,150 @@ export function HeroVisual({ visual, name }) {
   )
 }
 
+export function WaitlistSignupBox({ product, source = 'hero' }) {
+  let auth = null
+  try {
+    auth = useAuth()
+  } catch {
+    auth = null
+  }
+  const profileEmail = auth?.profile?.email || ''
+  const userId = auth?.user?.id || ''
+  const [email, setEmail] = useState(profileEmail)
+  const [submitting, setSubmitting] = useState(false)
+  const [submitted, setSubmitted] = useState(false)
+  const [error, setError] = useState('')
+  const [poll, setPoll] = useState(null)
+  const [voted, setVoted] = useState(false)
+  const [voting, setVoting] = useState(false)
+
+  useEffect(() => {
+    if (profileEmail && !email) setEmail(profileEmail)
+  }, [profileEmail, email])
+
+  const waitlistConfig = product?.waitlistConfig || {}
+  const waitlistCount = Number(product?.waitlistCount || 0)
+  const incentive = waitlistConfig.incentive || 'Join the early-access VIP list for launch day pricing and instant access notifications.'
+  const timeline = waitlistConfig.launchTimeline || 'Coming Soon'
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    if (!email || !email.includes('@')) {
+      setError('Please enter a valid email address.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const res = await subscribeWaitlist(product.key, {
+        email: email.trim(),
+        userId,
+        source: `product_page_${source}`,
+      })
+      setSubmitted(true)
+      if (res?.poll && Array.isArray(res.poll.options) && res.poll.options.length > 0) {
+        setPoll(res.poll)
+      }
+    } catch (err) {
+      setError(err.message || 'Could not join waitlist. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleVote = async (option) => {
+    if (voting || voted) return
+    setVoting(true)
+    try {
+      await voteWaitlistPoll(product.key, { email: email.trim(), vote: option })
+      setVoted(true)
+    } catch {
+      setVoted(true)
+    } finally {
+      setVoting(false)
+    }
+  }
+
+  return (
+    <div className={`waitlist-box waitlist-box--${source}`}>
+      <div className="waitlist-box__header">
+        <span className="waitlist-box__tag">
+          <Sparkles size={13} /> {timeline}
+        </span>
+        {waitlistCount > 0 && (
+          <span className="waitlist-box__count">
+            <Zap size={13} /> {waitlistCount} {waitlistCount === 1 ? 'founder' : 'founders'} on waitlist
+          </span>
+        )}
+      </div>
+
+      {!submitted ? (
+        <form className="waitlist-form" onSubmit={handleSubmit}>
+          <p className="waitlist-box__incentive">{incentive}</p>
+          <div className="waitlist-form__input-wrap">
+            <input
+              type="email"
+              className="waitlist-form__input"
+              placeholder="Enter your work email..."
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              disabled={submitting}
+              required
+            />
+            <button className="button button--lime waitlist-form__button" type="submit" disabled={submitting}>
+              {submitting ? 'Joining...' : <>Notify me when live <ArrowRight size={15} /></>}
+            </button>
+          </div>
+          {error && <p className="waitlist-form__error">{error}</p>}
+          <p className="waitlist-form__note">
+            <LockKeyhole size={12} /> We will send one email from <b>info@runwaysystems.cloud</b> when live. No spam.
+          </p>
+        </form>
+      ) : (
+        <div className="waitlist-success">
+          <div className="waitlist-success__banner">
+            <span className="waitlist-success__icon"><Check size={18} /></span>
+            <div>
+              <b>You&apos;re on the early-access list!</b>
+              <p>We will email <b>{email}</b> the moment {product.name} launches with your VIP access.</p>
+            </div>
+          </div>
+
+          {poll && (
+            <div className="waitlist-poll">
+              <p className="waitlist-poll__question">
+                <BarChart3 size={14} /> {poll.question}
+              </p>
+              {!voted ? (
+                <div className="waitlist-poll__options">
+                  {poll.options.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className="waitlist-poll__btn"
+                      disabled={voting}
+                      onClick={() => handleVote(option)}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="waitlist-poll__thanks">
+                  <Check size={14} /> Thank you for your vote! This helps us prioritize the Google Sheets release.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ProductHero({ product, offer, onToggleCart, inCart }) {
   const visual = product.hero.visual
+  const isComingSoon = product.status === 'coming_soon'
 
   return (
     <section className="hero dark-section">
@@ -359,18 +503,26 @@ export function ProductHero({ product, offer, onToggleCart, inCart }) {
       <div className="shell hero-layout">
         <div className="hero-copy">
           <Link to="/" className="hero-back-link"><ArrowLeft size={14} /> All products</Link>
-          <div className="pill hero-pill"><Sparkles size={14} /> {product.name} <i /> A Runway Systems product</div>
+          <div className="pill hero-pill">
+            <Sparkles size={14} /> {product.name} <i /> {isComingSoon ? (product.waitlistConfig?.launchTimeline || 'Coming Soon') : 'A Runway Systems product'}
+          </div>
           <h1>{product.hero.h1[0]}<br /><span>{product.hero.h1[1]}</span></h1>
           <p className="hero-lede">{product.hero.lede}</p>
-          <div className="hero-actions">
-            <a href="#pricing" className="button button--lime button--large">Get {product.name} for {offer.displaySalePrice} <ArrowRight size={18} /></a>
-            {onToggleCart && (
-              <button className={cx('button button--outline button--large', inCart && 'is-added')} type="button" onClick={onToggleCart} aria-pressed={inCart}>
-                {inCart ? <><Check size={15} /> In cart</> : <><ShoppingBag size={15} /> Add to cart</>}
-              </button>
-            )}
-            <a href="#preview" className="text-link">See what’s inside <ArrowRight size={15} /></a>
-          </div>
+
+          {isComingSoon ? (
+            <WaitlistSignupBox product={product} source="hero" />
+          ) : (
+            <div className="hero-actions">
+              <a href="#pricing" className="button button--lime button--large">Get {product.name} for {offer.displaySalePrice} <ArrowRight size={18} /></a>
+              {onToggleCart && (
+                <button className={cx('button button--outline button--large', inCart && 'is-added')} type="button" onClick={onToggleCart} aria-pressed={inCart}>
+                  {inCart ? <><Check size={15} /> In cart</> : <><ShoppingBag size={15} /> Add to cart</>}
+                </button>
+              )}
+              <a href="#preview" className="text-link">See what’s inside <ArrowRight size={15} /></a>
+            </div>
+          )}
+
           <div className="hero-trust">
             <span><Check size={14} /> One-time payment</span>
             <span><Check size={14} /> Instant access</span>
@@ -703,6 +855,8 @@ export function ProductPricing({ product, onBuy, offer, onToggleCart, inCart }) 
   const cardRef = useRef(null)
   const ProductIcon = sectionIcon(product.icon)
   const { pricing } = product
+  const isComingSoon = product.status === 'coming_soon'
+
   const tiltCard = (event) => {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
     if (!window.matchMedia('(hover: hover) and (pointer: fine)').matches) return
@@ -722,31 +876,42 @@ export function ProductPricing({ product, onBuy, offer, onToggleCart, inCart }) 
       <div className="pricing-orb" aria-hidden="true" />
       <div className="shell pricing-layout">
         <div className="pricing-copy reveal">
-          <p className="eyebrow">{pricing.eyebrow}</p>
-          <h2>{pricing.h2[0]}</h2>
-          <p>{pricing.intro}</p>
+          <p className="eyebrow">{isComingSoon ? 'EARLY ACCESS' : pricing.eyebrow}</p>
+          <h2>{isComingSoon ? `Get early access to ${product.name}` : pricing.h2[0]}</h2>
+          <p>{isComingSoon ? (product.waitlistConfig?.incentive || 'Join the early-access list to be notified on launch day with exclusive introductory pricing.') : pricing.intro}</p>
           <div className="price-reassurance">
-            <span><ShieldCheck /> {pricing.reassurance[0]}</span>
-            <span><Zap /> {pricing.reassurance[1]}</span>
-            <span><InfinityIcon /> {pricing.reassurance[2]}</span>
+            <span><ShieldCheck /> Google Sheets only</span>
+            <span><Zap /> {isComingSoon ? 'VIP launch access' : pricing.reassurance[1]}</span>
+            <span><InfinityIcon /> Lifetime updates</span>
           </div>
         </div>
         <article className="price-card reveal" ref={cardRef} onPointerMove={tiltCard} onPointerLeave={resetCard} onPointerCancel={resetCard}>
-          {offer.offerActive && <div className="offer-ribbon">{offer.offerLabel}</div>}
+          {offer.offerActive && <div className="offer-ribbon">{isComingSoon ? (product.waitlistConfig?.launchTimeline || 'COMING SOON') : offer.offerLabel}</div>}
           <div className="price-card-head">
             <div><span className="product-icon"><ProductIcon /></span><p>{product.name}</p></div>
-            <span className="one-time">ONE-TIME</span>
+            <span className="one-time">{isComingSoon ? 'PRE-LAUNCH' : 'ONE-TIME'}</span>
           </div>
-          <div className="price">{offer.offerActive && <s>{offer.displayOriginalPrice}</s>}<strong>{offer.displaySalePrice}</strong><span>USD<br />once</span></div>
-          <p className="price-sub">{pricing.priceSub}</p>
+          <div className="price">
+            {offer.offerActive && <s>{offer.displayOriginalPrice}</s>}
+            <strong>{offer.displaySalePrice}</strong>
+            <span>{isComingSoon ? 'at launch' : 'USD'}<br />{isComingSoon ? 'early price' : 'once'}</span>
+          </div>
+          <p className="price-sub">{isComingSoon ? 'Join the waitlist to receive your launch notification.' : pricing.priceSub}</p>
           <div className="included-list">{pricing.included.map((item) => <span key={item}><Check /> {item}</span>)}</div>
-          <button className="button button--lime button--xl button--full" onClick={onBuy} disabled={!product.checkoutReady}>
-            {product.checkoutReady ? <>Get instant access <ArrowRight /></> : 'Coming soon'}
-          </button>
-          {onToggleCart && (
-            <button className={cx('button button--outline button--full', inCart && 'is-added')} type="button" onClick={onToggleCart} aria-pressed={inCart}>
-              {inCart ? <><Check size={15} /> In cart</> : <><ShoppingBag size={15} /> Add to cart</>}
-            </button>
+
+          {isComingSoon ? (
+            <WaitlistSignupBox product={product} source="pricing" />
+          ) : (
+            <>
+              <button className="button button--lime button--xl button--full" onClick={onBuy} disabled={!product.checkoutReady}>
+                {product.checkoutReady ? <>Get instant access <ArrowRight /></> : 'Coming soon'}
+              </button>
+              {onToggleCart && (
+                <button className={cx('button button--outline button--full', inCart && 'is-added')} type="button" onClick={onToggleCart} aria-pressed={inCart}>
+                  {inCart ? <><Check size={15} /> In cart</> : <><ShoppingBag size={15} /> Add to cart</>}
+                </button>
+              )}
+            </>
           )}
           <p className="secure-note">
             <LockKeyhole /> Secure checkout powered by Lemon Squeezy · Tax handled as the merchant of record
@@ -775,18 +940,27 @@ export function ProductFAQ({ product, supportEmail }) {
 
 export function FinalCTA({ product, onBuy, offer }) {
   const { finalCta } = product
+  const isComingSoon = product.status === 'coming_soon'
+
   return (
-    <section className="final-cta dark-section">
+    <section className="final-cta dark-section" id="notify">
       <div className="final-grid" aria-hidden="true" />
       <div className="final-glow" aria-hidden="true" />
       <div className="shell final-inner reveal">
         <span className="final-icon"><TrendingUp /></span>
-        <p className="eyebrow">{finalCta.eyebrow}</p>
-        <h2>{finalCta.h2[0]}<br /><span>{finalCta.h2[1]}</span></h2>
-        <p>{finalCta.copy}</p>
-        <button className="button button--lime button--xl" onClick={onBuy} disabled={!product.checkoutReady}>
-          {product.checkoutReady ? <>Get {product.name} for {offer.displaySalePrice} <ArrowRight /></> : 'Coming soon'}
-        </button>
+        <p className="eyebrow">{isComingSoon ? 'EARLY ACCESS' : finalCta.eyebrow}</p>
+        <h2>{isComingSoon ? `Get notified when ${product.name} launches` : <>{finalCta.h2[0]}<br /><span>{finalCta.h2[1]}</span></>}</h2>
+        <p>{isComingSoon ? 'Be the first to get access the moment this Google Sheets system goes live.' : finalCta.copy}</p>
+
+        {isComingSoon ? (
+          <div style={{ maxWidth: 560, margin: '0 auto', width: '100%' }}>
+            <WaitlistSignupBox product={product} source="final" />
+          </div>
+        ) : (
+          <button className="button button--lime button--xl" onClick={onBuy} disabled={!product.checkoutReady}>
+            {product.checkoutReady ? <>Get {product.name} for {offer.displaySalePrice} <ArrowRight /></> : 'Coming soon'}
+          </button>
+        )}
         <small>{finalCta.small.map((item) => <span key={item}><Check /> {item} </span>)}</small>
       </div>
     </section>

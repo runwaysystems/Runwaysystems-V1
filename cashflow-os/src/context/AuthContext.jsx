@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { getUserProfile, isSupabaseConfigured, supabase, userIsOwner } from '../lib/supabase'
+import { syncAudienceContact } from '../api/platformApi'
 
 const AuthContext = createContext(null)
 
@@ -26,6 +27,9 @@ export function AuthProvider({ children }) {
       if (!active) return
       if (sessionError) setError(sessionError.message)
       setSession(data.session)
+      if (data.session?.user) {
+        syncAudienceContact(data.session.user, { token: data.session.access_token }).catch(() => {})
+      }
       setLoading(false)
     }).catch((sessionError) => {
       if (!active) return
@@ -42,6 +46,9 @@ export function AuthProvider({ children }) {
       if (nextSession) {
         setError('')
         setAuthOpen(false)
+        if (nextSession.user) {
+          syncAudienceContact(nextSession.user, { token: nextSession.access_token }).catch(() => {})
+        }
       }
     })
 

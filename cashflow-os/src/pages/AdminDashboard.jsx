@@ -11,6 +11,7 @@ import {
   CircleDollarSign,
   Copy,
   Cloud,
+  Download,
   Eye,
   ImagePlus,
   LoaderCircle,
@@ -18,29 +19,36 @@ import {
   Mail,
   MousePointerClick,
   Save,
+  Send,
   Settings2,
   ShieldCheck,
   ShoppingBag,
   Sparkles,
   Star,
   Trash2,
+  Users,
   X,
+  Zap,
 } from 'lucide-react'
 import { Link, Navigate } from 'react-router-dom'
 import {
   IS_PREVIEW_DATA,
+  broadcastLaunchEmail,
   createAdminBundle,
   createAdminProduct,
   createProductFeature,
   deleteAdminBundle,
   deleteAdminProduct,
   deleteProductFeature,
+  exportAdminProductWaitlist,
   getAdminBundles,
   getAdminProducts,
+  getAdminProductWaitlist,
   getAdminSettings,
   getAnalytics,
   getIntegrationStatus,
   getTestimonials,
+  sendTestWaitlistEmail,
   updateAdminBundle,
   updateAdminProduct,
   updateAdminSettings,
@@ -54,6 +62,7 @@ import AdminBundlesPanel from './AdminBundlesPanel'
 import ProductPreviewPane from './ProductPreviewPane'
 import AdminContentPanel from './AdminContentPanel'
 import AdminOffersPanel from './AdminOffersPanel'
+import AdminMarketingPanel from './AdminMarketingPanel'
 import { AccountButton } from '../components/AuthUI'
 import { Logo } from '../components/Brand'
 import { isSupabaseConfigured } from '../lib/supabase'
@@ -83,26 +92,7 @@ function AdminLoading() {
   )
 }
 
-export function OwnerRoute({ children }) {
-  const { user, isOwner, loading } = useAuth()
-  // Without Supabase credentials there is no sign-in at all, so the redirect
-  // below would bounce the owner to the homepage with no explanation. Say so
-  // instead: this is a build configuration problem, not an access problem.
-  if (!isSupabaseConfigured) {
-    return (
-      <div className="admin-route-loading" role="alert">
-        <AlertTriangle />
-        <span>
-          Sign-in is not configured in this build. Set <code>VITE_SUPABASE_URL</code> and
-          {' '}<code>VITE_SUPABASE_ANON_KEY</code> in the Pages build variables and redeploy.
-        </span>
-      </div>
-    )
-  }
-  if (loading) return <AdminLoading />
-  if (!user || !isOwner) return <Navigate to="/" replace state={{ ownerAccessDenied: true }} />
-  return children
-}
+export { default as OwnerRoute } from '../components/OwnerRoute'
 
 function MetricCard({ metric, value }) {
   const Icon = metric.icon
@@ -355,6 +345,7 @@ const emptyProductDraft = (duplicateFrom = '') => ({
   salePrice: '',
   offerLabel: '',
   offerActive: true,
+  status: 'active',
   active: true,
   featured: false,
   sortOrder: 10,
@@ -362,9 +353,23 @@ const emptyProductDraft = (duplicateFrom = '') => ({
   heroImage: '',
   featureImages: [],
   features: [],
+  waitlistConfig: {
+    launchTimeline: '',
+    incentive: '',
+    showSocialProof: true,
+    socialProofOffset: 0,
+    welcomeEmailEnabled: true,
+    welcomeEmailSubject: '',
+    welcomeEmailBody: '',
+    pollEnabled: false,
+    pollQuestion: '',
+    pollOptionsText: '',
+  },
 })
 
 function draftFromProduct(product) {
+  const status = product.status || (product.active ? 'active' : 'hidden')
+  const wc = product.waitlistConfig || {}
   return {
     isNew: false,
     key: product.key,
@@ -379,14 +384,267 @@ function draftFromProduct(product) {
     salePrice: product.salePrice || '',
     offerLabel: product.offerLabel || '',
     offerActive: Boolean(product.offerActive),
-    active: Boolean(product.active),
+    status,
+    active: status !== 'hidden',
     featured: Boolean(product.featured),
     sortOrder: product.sortOrder || 0,
     includesText: (product.includes || []).join('\n'),
     heroImage: product.heroImage || '',
     featureImages: Array.isArray(product.featureImages) ? [...product.featureImages] : [],
     features: Array.isArray(product.features) ? [...product.features] : [],
+    waitlistConfig: {
+      launchTimeline: wc.launchTimeline || '',
+      incentive: wc.incentive || '',
+      showSocialProof: wc.showSocialProof !== false,
+      socialProofOffset: Number(wc.socialProofOffset) || 0,
+      welcomeEmailEnabled: wc.welcomeEmailEnabled !== false,
+      welcomeEmailSubject: wc.welcomeEmailSubject || '',
+      welcomeEmailBody: wc.welcomeEmailBody || '',
+      pollEnabled: Boolean(wc.pollEnabled),
+      pollQuestion: wc.pollQuestion || '',
+      pollOptionsText: Array.isArray(wc.pollOptions) ? wc.pollOptions.join('\n') : (wc.pollOptionsText || ''),
+    },
   }
+}
+
+function WaitlistBroadcastManager({ productKey, productName, notify }) {
+  const { session } = useAuth()
+  const authOptions = useMemo(() => ({ token: session?.access_token }), [session?.access_token])
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [testSending, setTestSending] = useState(false)
+  const [broadcastModalOpen, setBroadcastModalOpen] = useState(false)
+  const [broadcasting, setBroadcasting] = useState(false)
+  const [subject, setSubject] = useState(`${productName || 'Product'} is now live on Runway Systems`)
+  const [message, setMessage] = useState(`The wait is over: ${productName || 'This system'} is officially live. As an early-access subscriber, you can get instant access now.`)
+
+  const loadData = useCallback(async () => {
+    try {
+      setLoading(true)
+      const res = await getAdminProductWaitlist(productKey, authOptions)
+      setData(res)
+    } catch {
+      // Ignore or fallback
+    } finally {
+      setLoading(false)
+    }
+  }, [productKey, authOptions])
+
+  useEffect(() => {
+    loadData()
+  }, [loadData])
+
+  const handleExport = async () => {
+    try {
+      const csv = await exportAdminProductWaitlist(productKey, authOptions)
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${productKey}-waitlist.csv`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      notify('Waitlist CSV exported successfully.')
+    } catch (err) {
+      notify(err.message || 'Failed to export CSV.')
+    }
+  }
+
+  const handleSendTest = async () => {
+    setTestSending(true)
+    try {
+      await sendTestWaitlistEmail(productKey, { subject, message }, authOptions)
+      notify('Test launch announcement email sent to store owner.')
+    } catch (err) {
+      notify(err.message || 'Failed to send test email.')
+    } finally {
+      setTestSending(false)
+    }
+  }
+
+  const handleBroadcast = async () => {
+    setBroadcasting(true)
+    try {
+      const res = await broadcastLaunchEmail(productKey, { subject, message }, authOptions)
+      notify(res.message || 'Launch announcement broadcast dispatched.')
+      setBroadcastModalOpen(false)
+      loadData()
+    } catch (err) {
+      notify(err.message || 'Broadcast failed.')
+    } finally {
+      setBroadcasting(false)
+    }
+  }
+
+  const unnotifiedCount = Math.max(0, (data?.totalSubscribers || 0) - (data?.notifiedCount || 0))
+
+  return (
+    <div className="waitlist-admin-hub">
+      <div className="waitlist-admin-hub__header">
+        <div>
+          <h4><Users size={16} /> Waitlist Subscribers &amp; Broadcast Center</h4>
+          <p className="admin-settings-group-copy">Monitor buyer signups, view feature demand poll results, and broadcast launch announcements via Brevo.</p>
+        </div>
+        <div className="waitlist-admin-hub__actions">
+          <button
+            type="button"
+            className="button button--dark button--small"
+            onClick={handleExport}
+            disabled={loading || !data?.totalSubscribers}
+          >
+            <Download size={14} /> Export CSV
+          </button>
+          <button
+            type="button"
+            className="button button--small"
+            onClick={handleSendTest}
+            disabled={testSending || loading}
+          >
+            <Send size={14} /> {testSending ? 'Sending test...' : 'Send test to me'}
+          </button>
+          <button
+            type="button"
+            className="button button--lime button--small"
+            onClick={() => setBroadcastModalOpen(true)}
+            disabled={loading || unnotifiedCount === 0}
+          >
+            <Sparkles size={14} /> Broadcast launch ({unnotifiedCount})
+          </button>
+        </div>
+      </div>
+
+      <div className="waitlist-admin-stats">
+        <div className="waitlist-stat-card">
+          <span>Total Subscribers</span>
+          <strong>{loading ? '...' : data?.totalSubscribers || 0}</strong>
+        </div>
+        <div className="waitlist-stat-card">
+          <span>Welcome Sent</span>
+          <strong>{loading ? '...' : data?.welcomeSentCount || 0}</strong>
+        </div>
+        <div className="waitlist-stat-card">
+          <span>Notified</span>
+          <strong>{loading ? '...' : data?.notifiedCount || 0}</strong>
+        </div>
+        <div className="waitlist-stat-card">
+          <span>Pending Launch Email</span>
+          <strong style={{ color: unnotifiedCount > 0 ? 'var(--lime, #c9a227)' : 'inherit' }}>
+            {loading ? '...' : unnotifiedCount}
+          </strong>
+        </div>
+      </div>
+
+      {data?.pollResults?.length > 0 && (
+        <div className="waitlist-poll-summary">
+          <h5><BarChart3 size={15} /> Subscriber Feature Poll Demand</h5>
+          <div className="waitlist-poll-bars">
+            {data.pollResults.map((item) => {
+              const totalVotes = data.pollResults.reduce((sum, r) => sum + r.count, 0)
+              const pct = totalVotes ? Math.round((item.count / totalVotes) * 100) : 0
+              return (
+                <div className="poll-bar-row" key={item.option}>
+                  <div className="poll-bar-row__label">
+                    <span>{item.option}</span>
+                    <b>{item.count} votes ({pct}%)</b>
+                  </div>
+                  <div className="poll-bar-track">
+                    <div className="poll-bar-fill" style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {data?.subscribers?.length > 0 && (
+        <div className="waitlist-subscribers-table-wrap">
+          <table className="admin-table waitlist-subscribers-table">
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Source</th>
+                <th>Poll Response</th>
+                <th>Welcome Email</th>
+                <th>Launch Email</th>
+                <th>Joined</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.subscribers.map((s) => (
+                <tr key={s.id}>
+                  <td><b>{s.email}</b></td>
+                  <td><span className="source-tag">{s.source}</span></td>
+                  <td>{s.pollResponse ? <span className="poll-tag">{s.pollResponse}</span> : <span className="text-dim">No vote</span>}</td>
+                  <td>{s.welcomeSentAt ? <span className="status-pill status-approved">sent</span> : <span className="status-pill status-pending">pending</span>}</td>
+                  <td>{s.notifiedAt ? <span className="status-pill status-approved">notified</span> : <span className="status-pill status-pending">waiting</span>}</td>
+                  <td><small>{new Date(s.createdAt).toLocaleDateString()}</small></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {broadcastModalOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setBroadcastModalOpen(false)}>
+          <div className="checkout-modal waitlist-broadcast-modal" role="dialog" onMouseDown={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setBroadcastModalOpen(false)}><X size={18} /></button>
+            <span className="modal-icon"><Sparkles size={21} /></span>
+            <p className="eyebrow">BREVO LAUNCH BROADCAST</p>
+            <h2>Broadcast {productName} is Live</h2>
+            <p>
+              This will send a live launch announcement email from <b>info@runwaysystems.cloud</b> to all <b>{unnotifiedCount}</b> unnotified subscribers on the waitlist.
+            </p>
+
+            <div className="broadcast-form">
+              <label className="portal-field">
+                <span>Email Subject</span>
+                <input
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  placeholder="e.g. Cash Flow OS is now officially live on Runway Systems"
+                  required
+                />
+              </label>
+
+              <label className="portal-field">
+                <span>Email Message Body</span>
+                <textarea
+                  rows="4"
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  placeholder="Write your launch message..."
+                  required
+                />
+              </label>
+            </div>
+
+            <div className="broadcast-modal-actions">
+              <button
+                type="button"
+                className="button button--dark"
+                onClick={() => setBroadcastModalOpen(false)}
+                disabled={broadcasting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button button--lime"
+                onClick={handleBroadcast}
+                disabled={broadcasting || unnotifiedCount === 0}
+              >
+                {broadcasting ? 'Broadcasting via Brevo...' : `Send to all ${unnotifiedCount} subscribers`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onUploadMedia, onPatchMedia, onCreateFeature, onUpdateFeature, onDeleteFeature, mediaBusy, notify, aiStatus = 'setup' }) {
@@ -396,6 +654,13 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
   const [draft, setDraft] = useState(null)
 
   const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }))
+  const updateWaitlist = (field, value) => setDraft((current) => current ? {
+    ...current,
+    waitlistConfig: {
+      ...(current.waitlistConfig || {}),
+      [field]: value,
+    },
+  } : current)
 
   const submit = (event) => {
     event.preventDefault()
@@ -602,6 +867,206 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
             </div>
           </fieldset>
 
+          <fieldset className="admin-settings-group admin-settings-group--status">
+            <legend>Storefront product status</legend>
+            <p className="admin-settings-group-copy">Control whether this product is live for instant purchase, in pre-launch waitlist mode, or hidden from the public store.</p>
+            <div className="product-status-picker">
+              <label className={cx('status-option', draft.status === 'active' && 'is-selected')}>
+                <input
+                  type="radio"
+                  name="product-status"
+                  value="active"
+                  checked={draft.status === 'active'}
+                  onChange={() => update('status', 'active')}
+                />
+                <span className="status-option__indicator is-active" />
+                <div className="status-option__content">
+                  <b>🟢 Live on Storefront</b>
+                  <small>Visible on homepage &amp; catalog with direct Lemon Squeezy checkout enabled.</small>
+                </div>
+              </label>
+
+              <label className={cx('status-option', draft.status === 'coming_soon' && 'is-selected')}>
+                <input
+                  type="radio"
+                  name="product-status"
+                  value="coming_soon"
+                  checked={draft.status === 'coming_soon'}
+                  onChange={() => update('status', 'coming_soon')}
+                />
+                <span className="status-option__indicator is-coming-soon" />
+                <div className="status-option__content">
+                  <b>🟡 Coming Soon (Waitlist Mode)</b>
+                  <small>Visible on homepage &amp; landing page with &ldquo;Coming Soon&rdquo; badge. Checkout is replaced with email capture.</small>
+                </div>
+              </label>
+
+              <label className={cx('status-option', draft.status === 'hidden' && 'is-selected')}>
+                <input
+                  type="radio"
+                  name="product-status"
+                  value="hidden"
+                  checked={draft.status === 'hidden'}
+                  onChange={() => update('status', 'hidden')}
+                />
+                <span className="status-option__indicator is-hidden" />
+                <div className="status-option__content">
+                  <b>⚪ Hidden (Draft)</b>
+                  <small>Hidden from storefront, catalog, footer, and sitemap. Existing buyers keep library access.</small>
+                </div>
+              </label>
+            </div>
+          </fieldset>
+
+          {draft.status === 'coming_soon' && (
+            <fieldset className="admin-settings-group admin-settings-group--waitlist">
+              <legend>Coming Soon &amp; Waitlist Hub</legend>
+              <p className="admin-settings-group-copy">Configure the early-access badge, VIP incentive, welcome email, 1-click feature poll, and launch announcement broadcast.</p>
+
+              <div className="admin-settings-group-grid">
+                <label className="portal-field">
+                  <span>Target launch timeline / badge</span>
+                  <input
+                    maxLength="80"
+                    value={draft.waitlistConfig.launchTimeline}
+                    onChange={(e) => updateWaitlist('launchTimeline', e.target.value)}
+                    placeholder="e.g. Q4 2026, Launching Next Week, In Final Beta"
+                  />
+                  <small>Shown in the champagne gold status pill on the hero and product card.</small>
+                </label>
+
+                <label className="portal-field">
+                  <span>VIP early-bird incentive text</span>
+                  <input
+                    maxLength="200"
+                    value={draft.waitlistConfig.incentive}
+                    onChange={(e) => updateWaitlist('incentive', e.target.value)}
+                    placeholder="e.g. Join the VIP waitlist for an exclusive 20% launch discount on day one."
+                  />
+                  <small>Compelling callout displayed above the email notification input.</small>
+                </label>
+
+                <label className="toggle-setting">
+                  <span>
+                    <b>Show social proof counter</b>
+                    <small>Displays &ldquo;⚡ N founders on waitlist&rdquo; above the email input.</small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={draft.waitlistConfig.showSocialProof}
+                    onChange={(e) => updateWaitlist('showSocialProof', e.target.checked)}
+                  />
+                  <i aria-hidden="true" />
+                </label>
+
+                <label className="portal-field">
+                  <span>Social proof starting offset</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100000"
+                    value={draft.waitlistConfig.socialProofOffset}
+                    onChange={(e) => updateWaitlist('socialProofOffset', Number(e.target.value) || 0)}
+                  />
+                  <small>Optional number added to live subscriber count for initial social proof.</small>
+                </label>
+              </div>
+
+              <div className="waitlist-subgroup">
+                <h4><Mail size={16} /> Instant Welcome Email (via Brevo)</h4>
+                <p className="admin-settings-group-copy">Automatically sends a branded confirmation from <b>info@runwaysystems.cloud</b> the moment a buyer enters their email.</p>
+                <div className="admin-settings-group-grid">
+                  <label className="toggle-setting admin-wide-field">
+                    <span>
+                      <b>Enable instant welcome email</b>
+                      <small>Confirm receipt and set expectations for the upcoming Google Sheets launch.</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={draft.waitlistConfig.welcomeEmailEnabled}
+                      onChange={(e) => updateWaitlist('welcomeEmailEnabled', e.target.checked)}
+                    />
+                    <i aria-hidden="true" />
+                  </label>
+
+                  {draft.waitlistConfig.welcomeEmailEnabled && (
+                    <>
+                      <label className="portal-field admin-wide-field">
+                        <span>Welcome email subject</span>
+                        <input
+                          maxLength="120"
+                          value={draft.waitlistConfig.welcomeEmailSubject}
+                          onChange={(e) => updateWaitlist('welcomeEmailSubject', e.target.value)}
+                          placeholder={`You're on the early-access list for ${draft.name || 'this product'}`}
+                        />
+                      </label>
+                      <label className="portal-field admin-wide-field">
+                        <span>Welcome email body message</span>
+                        <textarea
+                          rows="3"
+                          maxLength="1000"
+                          value={draft.waitlistConfig.welcomeEmailBody}
+                          onChange={(e) => updateWaitlist('welcomeEmailBody', e.target.value)}
+                          placeholder={`Thank you for requesting early notification for ${draft.name || 'this product'} on Runway Systems. We're finalizing this Google Sheets operating system and will email you the moment it goes live with your VIP access.`}
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="waitlist-subgroup">
+                <h4><BarChart3 size={16} /> 1-Click Feature Demand Poll</h4>
+                <p className="admin-settings-group-copy">Collect high-value market intelligence right after visitors subscribe.</p>
+                <div className="admin-settings-group-grid">
+                  <label className="toggle-setting admin-wide-field">
+                    <span>
+                      <b>Enable 1-click feature poll</b>
+                      <small>Shows a quick question immediately after email submission.</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={draft.waitlistConfig.pollEnabled}
+                      onChange={(e) => updateWaitlist('pollEnabled', e.target.checked)}
+                    />
+                    <i aria-hidden="true" />
+                  </label>
+
+                  {draft.waitlistConfig.pollEnabled && (
+                    <>
+                      <label className="portal-field admin-wide-field">
+                        <span>Poll question</span>
+                        <input
+                          maxLength="160"
+                          value={draft.waitlistConfig.pollQuestion}
+                          onChange={(e) => updateWaitlist('pollQuestion', e.target.value)}
+                          placeholder="Which feature is most critical for your business?"
+                        />
+                      </label>
+                      <label className="portal-field admin-wide-field">
+                        <span>Poll choices (one per line)</span>
+                        <textarea
+                          rows="4"
+                          value={draft.waitlistConfig.pollOptionsText}
+                          onChange={(e) => updateWaitlist('pollOptionsText', e.target.value)}
+                          placeholder={'Automated dashboard summaries\nMulti-currency support\nTax reserve forecasting\nClient retainer tracking'}
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {!draft.isNew && (
+                <WaitlistBroadcastManager
+                  productKey={draft.key}
+                  productName={draft.name}
+                  notify={notify}
+                />
+              )}
+            </fieldset>
+          )}
+
           <fieldset className="admin-settings-group admin-settings-group--display">
             <legend>What customers see</legend>
             <p className="admin-settings-group-copy">Display copy only. Confirm the visible price matches the amount behind the Lemon Squeezy variant.</p>
@@ -621,11 +1086,6 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
               <label className="toggle-setting">
                 <span><b>Offer active</b><small>Shows the ribbon and struck-through original price.</small></span>
                 <input type="checkbox" checked={draft.offerActive} onChange={(event) => update('offerActive', event.target.checked)} />
-                <i aria-hidden="true" />
-              </label>
-              <label className="toggle-setting">
-                <span><b>Visible on storefront</b><small>Turn off to hide it completely: removed from the catalog, homepage, footer and sitemap, its product page returns 404, and checkout is refused. Existing customers keep their purchase and delivery link, and all content is kept for when you turn it back on.</small></span>
-                <input type="checkbox" checked={draft.active} onChange={(event) => update('active', event.target.checked)} />
                 <i aria-hidden="true" />
               </label>
               <label className="toggle-setting">
@@ -653,7 +1113,7 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
                   <p className="media-editor__title">Hero dashboard screenshot</p>
                   <div className={cx('media-hero-frame', draft.heroImage && 'has-image')}>
                     {draft.heroImage
-                      ? <img src={draft.heroImage} alt={`${draft.name || 'Product'} hero screenshot`} />
+                      ? <img src={draft.heroImage} alt={`${draft.name || 'Product'} hero screenshot`} loading="lazy" decoding="async" />
                       : <span className="media-empty"><ImagePlus size={20} /> Wide screenshot of the main dashboard</span>}
                     <div className="media-hero-actions">
                       {draft.heroImage && (
@@ -675,7 +1135,7 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
                       <div className="feature-editor-card" key={feature.id}>
                         <span className="feature-editor-card__number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
                         <div className="feature-editor-card__thumb">
-                          <img src={feature.imagePath} alt={feature.heading || `Feature ${index + 1} screenshot`} />
+                          <img src={feature.imagePath} alt={feature.heading || `Feature ${index + 1} screenshot`} loading="lazy" decoding="async" />
                         </div>
                         <div className="feature-editor-card__fields">
                           <label className="portal-field">
@@ -755,8 +1215,10 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
             <span className={`product-admin-icon is-${product.accent}`} aria-hidden="true">{product.icon === 'spreadsheet' ? '▦' : product.icon === 'users' ? '◎' : product.icon === 'gauge' ? '◔' : product.icon === 'receipt' ? '▤' : '▣'}</span>
             <div className="product-admin-identity"><strong>{product.name}</strong><small>/{product.key} · {product.category || 'No category'}</small></div>
             <div className="product-admin-price"><b>{product.salePrice || 'Unpriced'}</b>{product.offerActive && <s>{product.originalPrice}</s>}</div>
+            <span className={`status-pill ${product.status === 'coming_soon' ? 'status-warning' : product.active ? 'status-approved' : 'status-pending'}`}>
+              {product.status === 'coming_soon' ? 'coming soon' : product.active ? 'live' : 'hidden'}
+            </span>
             <span className={`status-pill ${product.lemonVariantId && product.lemonVariantId !== '' ? 'status-approved' : 'status-rejected'}`}>{product.lemonVariantId && product.lemonVariantId !== '' ? 'checkout ready' : 'needs variant'}</span>
-            <span className={`status-pill ${product.active ? 'status-approved' : 'status-pending'}`}>{product.active ? 'visible' : 'hidden'}</span>
             <button className="button text button--small" type="button" onClick={() => setDraft(draftFromProduct(product))}>Edit</button>
             <button
               className="button text button--small"
@@ -984,10 +1446,12 @@ export default function AdminDashboard() {
         salePrice: draft.salePrice,
         offerLabel: draft.offerLabel,
         offerActive: draft.offerActive,
-        active: draft.active,
+        status: draft.status || (draft.active ? 'active' : 'hidden'),
+        active: draft.status === 'hidden' ? false : Boolean(draft.active),
         featured: draft.featured,
         sortOrder: Number(draft.sortOrder) || 0,
         includes: String(draft.includesText || '').split('\n').map((item) => item.trim()).filter(Boolean),
+        waitlistConfig: draft.waitlistConfig || {},
       }
       const saved = draft.isNew
         ? await createAdminProduct({ ...input, key: draft.key, ...(draft.duplicateFrom ? { duplicateFrom: draft.duplicateFrom } : {}) }, authOptions)
@@ -1165,6 +1629,7 @@ export default function AdminDashboard() {
         <nav className="admin-section-nav" aria-label="Dashboard sections">
           {[
             ['#products', 'Products'],
+            ['#marketing', 'Email Marketing'],
             ['#content', 'Content studio'],
             ['#bundles', 'Bundles'],
             ['#offers', 'Offers'],
@@ -1201,6 +1666,8 @@ export default function AdminDashboard() {
           <RevenueChart analytics={analytics} />
           <ConversionChart analytics={analytics} />
         </section>
+
+        <AdminMarketingPanel products={products} notify={setNotice} />
 
         <ProductsPanel
           products={products}

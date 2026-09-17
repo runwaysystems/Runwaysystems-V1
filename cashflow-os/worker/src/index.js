@@ -557,7 +557,19 @@ function cleanDefaultOffer(input) {
   }
 }
 
+function parseWaitlistConfig(raw) {
+  if (!raw) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 function productRowToConfig(row) {
+  const status = row.status || (row.active ? 'active' : 'hidden')
   return {
     key: row.key,
     name: row.name,
@@ -575,8 +587,10 @@ function productRowToConfig(row) {
     heroImage: row.hero_image || '',
     featureImages: parseStringList(row.feature_images),
     content: parseContentJson(row.content),
+    status,
+    waitlistConfig: parseWaitlistConfig(row.waitlist_config),
     updatedAt: row.updated_at || '',
-    active: Boolean(row.active),
+    active: Boolean(row.active && status !== 'hidden'),
     featured: Boolean(row.featured),
     sortOrder: Number(row.sort_order || 0),
   }
@@ -630,7 +644,8 @@ async function isKnownProductKey(env, key) {
   return Boolean(row)
 }
 
-function publicProductShape(product, features = []) {
+function publicProductShape(product, features = [], waitlistCount = 0) {
+  const status = product.status || (product.active ? 'active' : 'hidden')
   return {
     key: product.key,
     name: product.name,
@@ -643,6 +658,9 @@ function publicProductShape(product, features = []) {
     offerLabel: product.offerLabel,
     offerActive: product.offerActive,
     active: product.active,
+    status,
+    waitlistConfig: product.waitlistConfig || {},
+    waitlistCount,
     featured: product.featured,
     sortOrder: product.sortOrder,
     includes: product.includes,
@@ -651,25 +669,37 @@ function publicProductShape(product, features = []) {
     features,
     content: product.content || {},
     updatedAt: product.updatedAt || '',
-    checkoutReady: Boolean(product.lemonVariantId && product.lemonVariantId !== ''),
+    checkoutReady: Boolean(product.lemonVariantId && product.lemonVariantId !== '' && status !== 'coming_soon'),
   }
 }
 
 async function getActiveProducts(env) {
   await ensureProductsSeeded(env)
   const settings = await getSettings(env)
-  const result = await env.DB.prepare('SELECT * FROM products WHERE active = 1 ORDER BY sort_order ASC, key ASC').all()
+  const result = await env.DB.prepare("SELECT * FROM products WHERE (active = 1 OR status = 'coming_soon') AND (status IS NULL OR status != 'hidden') ORDER BY sort_order ASC, key ASC").all()
   const rows = result.results || []
   const featuresByKey = await featuresMapForProducts(env, rows)
+
+  const waitlistCounts = new Map()
+  try {
+    const wCounts = await env.DB.prepare('SELECT product_key, COUNT(*) as count FROM product_waitlist GROUP BY product_key').all()
+    for (const r of wCounts.results || []) {
+      waitlistCounts.set(r.product_key, Number(r.count) || 0)
+    }
+  } catch { /* if waitlist table is not yet migrated in test env */ }
+
   return rows.map((row) => {
     const product = productRowToConfig(row)
     if (product.key === PRODUCT_KEY) {
-        product.deliveryUrl = product.deliveryUrl || env.GOOGLE_SHEETS_COPY_URL || ''
+      product.deliveryUrl = product.deliveryUrl || env.GOOGLE_SHEETS_COPY_URL || ''
       product.originalPrice = product.originalPrice || settings.displayOriginalPrice || ''
       product.salePrice = product.salePrice || settings.displaySalePrice || ''
       product.offerLabel = product.offerLabel || settings.offerLabel || ''
     }
-    return publicProductShape(product, featuresByKey.get(product.key) || [])
+    const rawCount = waitlistCounts.get(product.key) || 0
+    const offset = Number(product.waitlistConfig?.socialProofOffset) || 0
+    const waitlistCount = rawCount + (product.waitlistConfig?.showSocialProof ? offset : 0)
+    return publicProductShape(product, featuresByKey.get(product.key) || [], waitlistCount)
   })
 }
 
@@ -760,6 +790,36 @@ function cleanProductInput(input, { create = false } = {}) {
   const variantId = cleanText(input.lemonVariantId, 20, 'Lemon Squeezy variant ID', { required: false })
   if (variantId && !/^\d{1,20}$/.test(variantId)) throw new HttpError(400, 'Lemon Squeezy variant ID must be a number')
   product.lemonVariantId = variantId
+
+  const status = ['active', 'coming_soon', 'hidden'].includes(input.status)
+    ? input.status
+    : (input.active === false ? 'hidden' : 'active')
+  product.status = status
+  product.active = status !== 'hidden'
+
+  let waitlistConfig = {}
+  if (input.waitlistConfig && typeof input.waitlistConfig === 'object') {
+    const wc = input.waitlistConfig
+    let pollOptions = []
+    if (Array.isArray(wc.pollOptions)) {
+      pollOptions = wc.pollOptions.map((o) => cleanText(o, 80, 'Poll option', { required: false })).filter(Boolean)
+    } else if (typeof wc.pollOptionsText === 'string') {
+      pollOptions = parseStringList(wc.pollOptionsText)
+    }
+    waitlistConfig = {
+      launchTimeline: cleanText(wc.launchTimeline, 80, 'Launch timeline', { required: false }),
+      incentive: cleanText(wc.incentive, 200, 'Incentive', { required: false }),
+      showSocialProof: Boolean(wc.showSocialProof),
+      socialProofOffset: Math.max(0, Math.min(100000, Number(wc.socialProofOffset) || 0)),
+      welcomeEmailEnabled: wc.welcomeEmailEnabled !== false,
+      welcomeEmailSubject: cleanText(wc.welcomeEmailSubject, 120, 'Welcome subject', { required: false }),
+      welcomeEmailBody: cleanText(wc.welcomeEmailBody, 1000, 'Welcome body', { required: false }),
+      pollEnabled: Boolean(wc.pollEnabled),
+      pollQuestion: cleanText(wc.pollQuestion, 160, 'Poll question', { required: false }),
+      pollOptions,
+    }
+  }
+  product.waitlistConfig = waitlistConfig
   return product
 }
 
@@ -938,8 +998,8 @@ async function createProduct(env, input) {
   await env.DB.prepare(`
     INSERT INTO products (
       key, name, tagline, category, icon, accent, lemon_variant_id, delivery_url,
-      original_price, sale_price, offer_label, offer_active, includes, active, featured, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      original_price, sale_price, offer_label, offer_active, includes, active, featured, sort_order, status, waitlist_config, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     product.key,
     product.name,
@@ -957,6 +1017,8 @@ async function createProduct(env, input) {
     product.active ? 1 : 0,
     product.featured ? 1 : 0,
     product.sortOrder,
+    product.status,
+    JSON.stringify(product.waitlistConfig || {}),
     updatedAt,
     updatedAt,
   ).run()
@@ -1013,7 +1075,7 @@ async function updateProduct(env, key, input) {
     UPDATE products SET
       name = ?, tagline = ?, category = ?, icon = ?, accent = ?, lemon_variant_id = ?, delivery_url = ?,
       original_price = ?, sale_price = ?, offer_label = ?, offer_active = ?, includes = ?,
-      active = ?, featured = ?, sort_order = ?, updated_at = ?
+      active = ?, featured = ?, sort_order = ?, status = ?, waitlist_config = ?, updated_at = ?
     WHERE key = ?
     RETURNING *
   `).bind(
@@ -1032,6 +1094,8 @@ async function updateProduct(env, key, input) {
     product.active ? 1 : 0,
     product.featured ? 1 : 0,
     product.sortOrder,
+    product.status,
+    JSON.stringify(product.waitlistConfig || {}),
     updatedAt,
     key,
   ).first()
@@ -1739,7 +1803,8 @@ async function createCheckoutSession(request, env, user) {
     if (seenKeys.has(productKey)) continue
     seenKeys.add(productKey)
     const product = await resolveProductConfig(env, productKey)
-    if (!product.active) throw new HttpError(404, `${product.name} is not available`)
+    if (!product.active || product.status === 'hidden') throw new HttpError(404, `${product.name} is not available`)
+    if (product.status === 'coming_soon') throw new HttpError(400, `${product.name} is coming soon and cannot be purchased yet`)
     const variantId = String(product.lemonVariantId || '').trim()
     if (!variantId) throw new HttpError(503, `No Lemon Squeezy variant is configured for ${product.name}`)
     items.push({ product, lemonVariantId: variantId })
@@ -1984,6 +2049,200 @@ function emailLayout(title, intro, actionLabel, actionUrl, footer, secondaryActi
 ${secondary}
 <tr><td style="color:#737b89;font-size:12px;line-height:1.6;padding-top:30px">${safeFooter}</td></tr>
 </table></td></tr></table></body></html>`
+}
+
+function parseJsonSafe(val, fallback = []) {
+  if (!val) return fallback
+  if (typeof val === 'object') return val
+  try {
+    const parsed = JSON.parse(val)
+    return parsed !== null ? parsed : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function isValidEmail(email) {
+  if (!email || typeof email !== 'string') return false
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+}
+
+async function recordAudienceContact(env, {
+  email,
+  userId = '',
+  name = '',
+  avatarUrl = '',
+  source = 'google_signin',
+  isCustomer = false,
+  spendCents = 0,
+  productKey = '',
+  waitlistKey = '',
+}) {
+  if (!env.DB || !email || !isValidEmail(email)) return
+  const cleanEmail = String(email).trim().toLowerCase()
+  const cleanName = String(name || '').trim().slice(0, 100)
+  const cleanAvatar = String(avatarUrl || '').trim().slice(0, 500)
+  const cleanUserId = String(userId || '').trim().slice(0, 80)
+  const now = nowIso()
+
+  try {
+    const existing = await env.DB.prepare('SELECT * FROM audience_contacts WHERE email = ?').bind(cleanEmail).first()
+    if (existing) {
+      const owned = parseJsonSafe(existing.products_owned, [])
+      if (productKey && !owned.includes(productKey)) owned.push(productKey)
+
+      const waitlists = parseJsonSafe(existing.waitlists_joined, [])
+      if (waitlistKey && !waitlists.includes(waitlistKey)) waitlists.push(waitlistKey)
+
+      const nextCustomer = (existing.is_customer || isCustomer || owned.length > 0) ? 1 : 0
+      const nextSpend = (existing.total_spend_cents || 0) + (spendCents || 0)
+      const nextOrders = (existing.orders_count || 0) + (spendCents > 0 || productKey ? 1 : 0)
+      const nextName = cleanName || existing.name || ''
+      const nextAvatar = cleanAvatar || existing.avatar_url || ''
+      const nextUserId = cleanUserId || existing.user_id || ''
+
+      await env.DB.prepare(`
+        UPDATE audience_contacts
+        SET user_id = CASE WHEN user_id = '' THEN ? ELSE user_id END,
+            name = CASE WHEN ? != '' THEN ? ELSE name END,
+            avatar_url = CASE WHEN ? != '' THEN ? ELSE avatar_url END,
+            is_customer = ?,
+            total_spend_cents = ?,
+            orders_count = ?,
+            products_owned = ?,
+            waitlists_joined = ?,
+            last_seen_at = ?
+        WHERE email = ?
+      `).bind(
+        nextUserId,
+        nextName, nextName,
+        nextAvatar, nextAvatar,
+        nextCustomer,
+        nextSpend,
+        nextOrders,
+        JSON.stringify(owned),
+        JSON.stringify(waitlists),
+        now,
+        cleanEmail
+      ).run()
+    } else {
+      const id = makeId('contact')
+      const owned = productKey ? [productKey] : []
+      const waitlists = waitlistKey ? [waitlistKey] : []
+      await env.DB.prepare(`
+        INSERT INTO audience_contacts (
+          id, email, user_id, name, avatar_url, source, status,
+          is_customer, total_spend_cents, orders_count, products_owned,
+          waitlists_joined, last_seen_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        id,
+        cleanEmail,
+        cleanUserId,
+        cleanName,
+        cleanAvatar,
+        source,
+        (isCustomer || productKey) ? 1 : 0,
+        spendCents || 0,
+        (spendCents > 0 || productKey) ? 1 : 0,
+        JSON.stringify(owned),
+        JSON.stringify(waitlists),
+        now,
+        now
+      ).run()
+    }
+  } catch (err) {
+    console.error('Failed to record audience contact', err?.message)
+  }
+}
+
+function renderMarketingTemplate(text, contact = {}, product = null) {
+  if (!text) return ''
+  const fullName = contact.name || 'there'
+  const firstName = contact.name ? contact.name.split(' ')[0] : 'there'
+  const email = contact.email || ''
+  const productName = product?.name || 'Runway Systems'
+
+  return text
+    .replace(/\{\{\s*first_name\s*\}\}/gi, firstName)
+    .replace(/\{\{\s*name\s*\}\}/gi, fullName)
+    .replace(/\{\{\s*email\s*\}\}/gi, email)
+    .replace(/\{\{\s*product_name\s*\}\}/gi, productName)
+}
+
+function formatMarketingBodyToHtml(text) {
+  if (!text) return ''
+  const paragraphs = text.split(/\n\s*\n/)
+  return paragraphs.map((p) => {
+    let formatted = escapeHtml(p.trim())
+    formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    formatted = formatted.replace(/\*(.*?)\*/g, '<em>$1</em>')
+    formatted = formatted.replace(/\n/g, '<br/>')
+    return `<p style="margin:0 0 16px 0;line-height:1.75;color:#cbd0d8">${formatted}</p>`
+  }).join('')
+}
+
+function marketingEmailLayout({
+  title,
+  eyebrow = 'RUNWAY SYSTEMS · VIP ANNOUNCEMENT',
+  bodyHtml,
+  discountCode = '',
+  actionLabel = '',
+  actionUrl = '',
+  footerText = '',
+  unsubscribeUrl = '',
+}) {
+  const safeTitle = escapeHtml(title)
+  const safeEyebrow = escapeHtml(eyebrow)
+  const safeLabel = escapeHtml(actionLabel)
+  const safeUrl = escapeHtml(actionUrl)
+
+  const discountSection = discountCode
+    ? `<tr><td style="padding:16px 0 20px 0">
+        <div style="background:#161922;border:1px dashed #c9a227;border-radius:12px;padding:16px 20px;text-align:center">
+          <span style="color:#a9afba;font-size:12px;text-transform:uppercase;letter-spacing:1px;display:block;margin-bottom:6px">Exclusive Promotion Code</span>
+          <code style="font-family:Courier,monospace;font-size:20px;font-weight:700;color:#c9a227;letter-spacing:2px;background:#0a0c10;padding:4px 12px;border-radius:6px;border:1px solid #2b3039">${escapeHtml(discountCode)}</code>
+        </div>
+      </td></tr>`
+    : ''
+
+  const ctaSection = (actionLabel && actionUrl)
+    ? `<tr><td style="padding:24px 0 16px 0" align="center">
+        <a href="${safeUrl}" style="display:inline-block;background:#c9a227;color:#0a0c10;text-decoration:none;font-weight:700;font-size:15px;padding:16px 32px;border-radius:9px;text-align:center;letter-spacing:0.3px">${safeLabel}</a>
+      </td></tr>`
+    : ''
+
+  const unsubscribeSection = unsubscribeUrl
+    ? `<a href="${escapeHtml(unsubscribeUrl)}" style="color:#737b89;text-decoration:underline">Unsubscribe</a> · `
+    : ''
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background:#0a0c10;color:#f4f1e9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0a0c10;padding:40px 16px">
+<tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:620px;background:#11141a;border:1px solid #242933;border-radius:18px;padding:40px">
+<tr><td style="color:#c9a227;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;padding-bottom:18px">${safeEyebrow}</td></tr>
+<tr><td style="font-size:28px;font-weight:700;line-height:1.2;color:#f4f1e9;padding-bottom:24px">${safeTitle}</td></tr>
+<tr><td style="color:#cbd0d8;font-size:15px;line-height:1.75;padding-bottom:12px">${bodyHtml}</td></tr>
+${discountSection}
+${ctaSection}
+<tr><td style="color:#737b89;font-size:12px;line-height:1.6;padding-top:36px;border-top:1px solid #1c212b;margin-top:24px">
+${footerText ? `<div>${escapeHtml(footerText)}</div>` : ''}
+<div style="padding-top:8px">
+${unsubscribeSection}
+<span>Runway Systems · info@runwaysystems.cloud</span>
+</div>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>`
 }
 
 async function sendDeliveryEmail(env, purchase, product) {
@@ -2287,6 +2546,18 @@ async function recordLemonOrder(env, data, eventKey, eventName, event = null) {
   statements.push(env.DB.prepare('INSERT OR IGNORE INTO processed_webhooks (event_id, event_type, processed_at) VALUES (?, ?, ?)').bind(eventKey, eventName, updatedAt))
   await env.DB.batch(statements)
 
+  for (const productKey of items) {
+    await recordAudienceContact(env, {
+      email,
+      userId,
+      name: String(attributes.user_name || '').trim(),
+      source: 'checkout',
+      isCustomer: true,
+      spendCents: totalAmount,
+      productKey,
+    })
+  }
+
   const rows = []
   for (const productKey of items) {
     const row = await env.DB.prepare('SELECT * FROM purchases WHERE order_identifier = ? AND product_key = ?').bind(identifier, productKey).first()
@@ -2390,6 +2661,15 @@ async function handleLemonSqueezyWebhook(request, env, ctx) {
 }
 
 async function getAccountPurchases(env, user) {
+  if (user?.email) {
+    await recordAudienceContact(env, {
+      email: user.email,
+      userId: user.id,
+      name: user.user_metadata?.full_name || user.user_metadata?.name || '',
+      avatarUrl: user.user_metadata?.avatar_url || user.user_metadata?.picture || '',
+      source: 'google_signin',
+    })
+  }
   const result = await env.DB.prepare(`
     SELECT * FROM purchases
     WHERE user_id = ? AND payment_status = 'paid'
@@ -2419,6 +2699,11 @@ async function deleteAccountData(env, user) {
 
   // Review requests hold delivery email addresses: delete outright.
   await env.DB.prepare('DELETE FROM review_requests WHERE user_id = ?').bind(user.id).run()
+
+  // Marketing audience contacts: remove personal identifiers
+  try {
+    await env.DB.prepare('DELETE FROM audience_contacts WHERE user_id = ? OR email = ?').bind(user.id, user.email || '').run()
+  } catch {}
 
   // Testimonials: withdraw from public display and clear name and text.
   await env.DB.prepare(`
@@ -2635,7 +2920,7 @@ async function handleRequest(request, env, ctx) {
         reviewPolicy: 'neutral-all-verified-buyers',
       })
     })
-    return json(request, env, JSON.parse(bodyText), 200, { 'Cache-Control': 'public, max-age=60' })
+    return json(request, env, JSON.parse(bodyText), 200, { 'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600' })
   }
   if (path === '/sitemap.xml' && request.method === 'GET') {
     const origin = getPrimaryOrigin(env)
@@ -2649,7 +2934,7 @@ async function handleRequest(request, env, ctx) {
     const xml = await getCachedPublic('sitemap', 60, async () => `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n${urls.join('\n')}\n</urlset>`)
     return new Response(xml, {
       status: 200,
-      headers: { 'Content-Type': 'application/xml; charset=utf-8', ...SECURITY_HEADERS, 'Cache-Control': 'public, max-age=0, must-revalidate' },
+      headers: { 'Content-Type': 'application/xml; charset=utf-8', ...SECURITY_HEADERS, 'Cache-Control': 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400' },
     })
   }
   if (path === '/events/page-view' && request.method === 'POST') {
@@ -2662,7 +2947,155 @@ async function handleRequest(request, env, ctx) {
   }
   if (path === '/testimonials' && request.method === 'GET') {
     const bodyText = await getCachedPublic('testimonials', 60, async () => JSON.stringify(await getApprovedTestimonials(env)))
-    return json(request, env, JSON.parse(bodyText), 200, { 'Cache-Control': 'public, max-age=60' })
+    return json(request, env, JSON.parse(bodyText), 200, { 'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600' })
+  }
+
+  if (path === '/waitlist/subscribe' && request.method === 'POST') {
+    const body = await readJson(request)
+    const productKey = cleanText(body.productKey, 60, 'Product key')
+    const email = cleanText(body.email, 254, 'Email').toLowerCase().trim()
+    if (!email || !email.includes('@') || !email.includes('.')) {
+      throw new HttpError(400, 'Please enter a valid email address')
+    }
+    await rateLimit(request, env, 'waitlist', 15, 3600, email)
+
+    await ensureProductsSeeded(env)
+    const productRow = await env.DB.prepare('SELECT * FROM products WHERE key = ?').bind(productKey).first()
+    if (!productRow) throw new HttpError(404, 'Product not found')
+    const product = productRowToConfig(productRow)
+    if (product.status !== 'coming_soon') {
+      throw new HttpError(400, 'This product is not currently accepting waitlist signups')
+    }
+
+    let existing = null
+    try {
+      existing = await env.DB.prepare('SELECT id, welcome_sent_at FROM product_waitlist WHERE product_key = ? AND email = ?').bind(productKey, email).first()
+    } catch { /* if table not yet migrated in test fixture */ }
+
+    const waitlistId = existing?.id || crypto.randomUUID()
+    const createdAt = nowIso()
+
+    if (!existing) {
+      const user = await authenticate(request, env).catch(() => null)
+      const userId = user?.id || cleanText(body.userId, 100, 'User ID', { required: false }) || ''
+      const source = cleanText(body.source, 40, 'Source', { required: false }) || 'product_page'
+
+      try {
+        await env.DB.prepare(`
+          INSERT INTO product_waitlist (id, product_key, email, user_id, source, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).bind(waitlistId, productKey, email, userId, source, createdAt).run()
+      } catch (err) {
+        logEvent('warn', 'waitlist.insert_failed', { error: err.message, email })
+      }
+
+      // Dispatch welcome email via Brevo if enabled
+      const waitlistConfig = product.waitlistConfig || {}
+      if (waitlistConfig.welcomeEmailEnabled !== false && env.BREVO_API_KEY) {
+        const subject = waitlistConfig.welcomeEmailSubject || `You're on the early-access list for ${product.name}`
+        const intro = waitlistConfig.welcomeEmailBody || `Thank you for requesting early notification for ${product.name} on Runway Systems. We're finalizing this Google Sheets operating system and will email you the moment it goes live, along with your early-bird access.`
+        const title = `Early access confirmed: ${product.name}`
+        const actionLabel = 'Explore Runway Systems'
+        const actionUrl = `${getPrimaryOrigin(env)}/products/${product.key}`
+        const footer = `You received this email because you requested notification for ${product.name} on Runway Systems.\nFrom: ${env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud'}`
+
+        const html = emailLayout(title, intro, actionLabel, actionUrl, footer, null, 'RUNWAY SYSTEMS · EARLY ACCESS')
+        try {
+          await sendBrevo(env, {
+            to: email,
+            from: env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud',
+            fromName: 'Runway Systems',
+            subject,
+            html,
+          })
+          await env.DB.prepare('UPDATE product_waitlist SET welcome_sent_at = ? WHERE id = ?').bind(nowIso(), waitlistId).run()
+        } catch (mailError) {
+          logEvent('warn', 'waitlist.welcome_email_failed', { error: mailError.message, email })
+        }
+      }
+
+      await recordAudienceContact(env, {
+        email,
+        userId,
+        name: user?.user_metadata?.full_name || user?.user_metadata?.name || '',
+        avatarUrl: user?.user_metadata?.avatar_url || user?.user_metadata?.picture || '',
+        source: 'waitlist',
+        waitlistKey: productKey,
+      })
+    }
+
+    return json(request, env, {
+      ok: true,
+      message: "You're on the early access list! We will notify you when it launches.",
+      poll: product.waitlistConfig?.pollEnabled ? {
+        question: product.waitlistConfig.pollQuestion || 'Which feature is most critical for your business?',
+        options: Array.isArray(product.waitlistConfig.pollOptions) && product.waitlistConfig.pollOptions.length
+          ? product.waitlistConfig.pollOptions
+          : ['Automated dashboard summaries', 'Multi-currency support', 'Tax reserve forecasting', 'Client retainer tracking'],
+      } : null,
+    }, 200)
+  }
+
+  if (path === '/waitlist/poll-vote' && request.method === 'POST') {
+    const body = await readJson(request)
+    const productKey = cleanText(body.productKey, 60, 'Product key')
+    const email = cleanText(body.email, 254, 'Email').toLowerCase().trim()
+    const vote = cleanText(body.vote, 200, 'Poll vote')
+    await rateLimit(request, env, 'waitlist-vote', 30, 3600, email)
+
+    try {
+      await env.DB.prepare('UPDATE product_waitlist SET poll_response = ? WHERE product_key = ? AND email = ?')
+        .bind(vote, productKey, email).run()
+    } catch { /* table may not be migrated */ }
+
+    return json(request, env, { ok: true, message: 'Thank you for your feedback!' }, 200)
+  }
+
+  if (path === '/account/sync' && request.method === 'POST') {
+    const user = await authenticate(request, env).catch(() => null)
+    if (user?.email) {
+      await recordAudienceContact(env, {
+        email: user.email,
+        userId: user.id || '',
+        name: user.user_metadata?.full_name || user.user_metadata?.name || '',
+        avatarUrl: user.user_metadata?.avatar_url || user.user_metadata?.picture || '',
+        source: 'google_signin',
+      })
+    }
+    return json(request, env, { ok: true }, 200, { 'Cache-Control': 'no-store' })
+  }
+
+  if (path === '/unsubscribe' && request.method === 'GET') {
+    const email = cleanText(url.searchParams.get('email') || '', 254, 'Email', { required: false }).toLowerCase()
+    if (email) {
+      try {
+        await env.DB.prepare("UPDATE audience_contacts SET status = 'unsubscribed' WHERE email = ?").bind(email).run()
+      } catch {}
+    }
+    const origin = getPrimaryOrigin(env)
+    const html = `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Unsubscribed · Runway Systems</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;background:#0a0c10;color:#f4f1e9;font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px">
+<div style="max-width:480px;background:#11141a;border:1px solid #242933;border-radius:16px;padding:36px;text-align:center">
+<div style="color:#c9a227;font-size:12px;font-weight:700;letter-spacing:2px;margin-bottom:12px">RUNWAY SYSTEMS</div>
+<h1 style="font-size:24px;margin:0 0 16px 0">Unsubscribed</h1>
+<p style="color:#a9afba;font-size:15px;line-height:1.6;margin-bottom:24px">You have been successfully removed from our marketing broadcast list. Essential purchase delivery emails will still reach your inbox.</p>
+<a href="${origin}" style="display:inline-block;background:#c9a227;color:#0a0c10;text-decoration:none;font-weight:700;padding:12px 24px;border-radius:8px">Return to Storefront</a>
+</div>
+</body></html>`
+    return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...SECURITY_HEADERS } })
+  }
+
+  if (path === '/marketing/unsubscribe' && request.method === 'POST') {
+    const body = await readJson(request)
+    const email = cleanText(body.email, 254, 'Email').toLowerCase().trim()
+    if (email) {
+      try {
+        await env.DB.prepare("UPDATE audience_contacts SET status = 'unsubscribed' WHERE email = ?").bind(email).run()
+      } catch {}
+    }
+    return json(request, env, { ok: true, message: 'Unsubscribed successfully' }, 200)
   }
 
   if (path === '/checkout/session' && request.method === 'POST') {
@@ -2922,6 +3355,576 @@ async function handleRequest(request, env, ctx) {
       await invalidatePublicCaches()
       return json(request, env, { removed: true, featureId }, 200, { 'Cache-Control': 'no-store' })
     }
+    match = routeMatch(path, /^\/admin\/products\/([^/]+)\/waitlist$/)
+    if (match && request.method === 'GET') {
+      const productKey = decodeURIComponent(match[1])
+      let stats = null
+      let pollRows = { results: [] }
+      let subscribers = { results: [] }
+      try {
+        stats = await env.DB.prepare(`
+          SELECT
+            COUNT(*) AS total,
+            COUNT(CASE WHEN notified_at IS NOT NULL THEN 1 END) AS notified,
+            COUNT(CASE WHEN welcome_sent_at IS NOT NULL THEN 1 END) AS welcome_sent
+          FROM product_waitlist WHERE product_key = ?
+        `).bind(productKey).first()
+
+        pollRows = await env.DB.prepare(`
+          SELECT poll_response AS option, COUNT(*) AS count
+          FROM product_waitlist
+          WHERE product_key = ? AND poll_response != ''
+          GROUP BY poll_response
+          ORDER BY count DESC
+        `).bind(productKey).all()
+
+        subscribers = await env.DB.prepare(`
+          SELECT id, email, source, poll_response, welcome_sent_at, notified_at, created_at
+          FROM product_waitlist
+          WHERE product_key = ?
+          ORDER BY created_at DESC
+          LIMIT 200
+        `).bind(productKey).all()
+      } catch { /* waitlist table fallback */ }
+
+      return json(request, env, {
+        totalSubscribers: Number(stats?.total || 0),
+        notifiedCount: Number(stats?.notified || 0),
+        welcomeSentCount: Number(stats?.welcome_sent || 0),
+        pollResults: pollRows.results || [],
+        subscribers: (subscribers.results || []).map((row) => ({
+          id: row.id,
+          email: row.email,
+          source: row.source,
+          pollResponse: row.poll_response,
+          welcomeSentAt: row.welcome_sent_at,
+          notifiedAt: row.notified_at,
+          createdAt: row.created_at,
+        })),
+      }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    match = routeMatch(path, /^\/admin\/products\/([^/]+)\/waitlist\/export$/)
+    if (match && request.method === 'GET') {
+      const productKey = decodeURIComponent(match[1])
+      let rows = { results: [] }
+      try {
+        rows = await env.DB.prepare(`
+          SELECT email, source, poll_response, welcome_sent_at, notified_at, created_at
+          FROM product_waitlist
+          WHERE product_key = ?
+          ORDER BY created_at DESC
+        `).bind(productKey).all()
+      } catch {}
+
+      const escapeCsv = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`
+      const lines = ['Email,Source,Poll Response,Welcome Sent At,Notified At,Signed Up At']
+      for (const r of rows.results || []) {
+        lines.push([
+          escapeCsv(r.email),
+          escapeCsv(r.source),
+          escapeCsv(r.poll_response),
+          escapeCsv(r.welcome_sent_at),
+          escapeCsv(r.notified_at),
+          escapeCsv(r.created_at),
+        ].join(','))
+      }
+      return new Response(lines.join('\n'), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${productKey}-waitlist.csv"`,
+          ...corsHeaders(request, env),
+          ...SECURITY_HEADERS,
+        },
+      })
+    }
+
+    match = routeMatch(path, /^\/admin\/products\/([^/]+)\/waitlist\/test-email$/)
+    if (match && request.method === 'POST') {
+      const productKey = decodeURIComponent(match[1])
+      await ensureProductsSeeded(env)
+      const productRow = await env.DB.prepare('SELECT * FROM products WHERE key = ?').bind(productKey).first()
+      if (!productRow) throw new HttpError(404, 'Product not found')
+      const product = productRowToConfig(productRow)
+      const body = await readJson(request)
+      const recipient = env.OWNER_EMAIL || 'runwaysystems.cloud@gmail.com'
+
+      const customSubject = cleanText(body.subject, 150, 'Subject', { required: false }) || `${product.name} is now live on Runway Systems`
+      const customMessage = cleanText(body.message, 2000, 'Message', { required: false }) || `The wait is over: ${product.name} is officially available. As an early-access subscriber, you can get instant access now.`
+      const title = `${product.name} is now live.`
+      const actionLabel = `Get ${product.name} →`
+      const actionUrl = `${getPrimaryOrigin(env)}/products/${product.key}`
+      const footer = `This is a test preview sent to the store owner (${recipient}).\nFrom: ${env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud'}`
+
+      const html = emailLayout(title, customMessage, actionLabel, actionUrl, footer, null, 'RUNWAY SYSTEMS · LAUNCH ANNOUNCEMENT [TEST]')
+      await sendBrevo(env, {
+        to: recipient,
+        from: env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud',
+        fromName: 'Runway Systems',
+        subject: `[TEST PREVIEW] ${customSubject}`,
+        html,
+      })
+
+      await writeAuditLog(env, request, ownerUser, 'waitlist.test_email', { entityType: 'product', entityId: productKey, details: { recipient } })
+      return json(request, env, { ok: true, message: `Test email sent to ${recipient}` }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    match = routeMatch(path, /^\/admin\/products\/([^/]+)\/waitlist\/broadcast$/)
+    if (match && request.method === 'POST') {
+      const productKey = decodeURIComponent(match[1])
+      await ensureProductsSeeded(env)
+      const productRow = await env.DB.prepare('SELECT * FROM products WHERE key = ?').bind(productKey).first()
+      if (!productRow) throw new HttpError(404, 'Product not found')
+      const product = productRowToConfig(productRow)
+      const body = await readJson(request)
+
+      const customSubject = cleanText(body.subject, 150, 'Subject', { required: false }) || `${product.name} is now live on Runway Systems`
+      const customMessage = cleanText(body.message, 2000, 'Message', { required: false }) || `The wait is over: ${product.name} is officially available. As an early-access subscriber, you can get instant access now.`
+      const title = `${product.name} is now live.`
+      const actionLabel = `Get ${product.name} →`
+      const actionUrl = `${getPrimaryOrigin(env)}/products/${product.key}`
+      const footer = `You received this email because you requested early notification for ${product.name} on Runway Systems.\nFrom: ${env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud'}`
+      const html = emailLayout(title, customMessage, actionLabel, actionUrl, footer, null, 'RUNWAY SYSTEMS · LAUNCH ANNOUNCEMENT')
+
+      let list = []
+      try {
+        const unnotified = await env.DB.prepare(`
+          SELECT id, email FROM product_waitlist WHERE product_key = ? AND notified_at IS NULL
+        `).bind(productKey).all()
+        list = unnotified.results || []
+      } catch {}
+
+      let sentCount = 0
+      const now = nowIso()
+
+      for (const subscriber of list) {
+        try {
+          await sendBrevo(env, {
+            to: subscriber.email,
+            from: env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud',
+            fromName: 'Runway Systems',
+            subject: customSubject,
+            html,
+          })
+          await env.DB.prepare('UPDATE product_waitlist SET notified_at = ? WHERE id = ?').bind(now, subscriber.id).run()
+          sentCount += 1
+        } catch (err) {
+          logEvent('warn', 'waitlist.broadcast_item_failed', { error: err.message, email: subscriber.email })
+        }
+      }
+
+      await writeAuditLog(env, request, ownerUser, 'waitlist.broadcast', {
+        entityType: 'product',
+        entityId: productKey,
+        details: { sentCount, totalUnnotified: list.length },
+      })
+
+      return json(request, env, {
+        ok: true,
+        sentCount,
+        totalQueued: list.length,
+        message: `Broadcast complete: sent to ${sentCount} subscribers.`,
+      }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (path === '/admin/marketing/audience' && request.method === 'GET') {
+      const segment = url.searchParams.get('segment') || 'all'
+      const search = (url.searchParams.get('search') || '').trim().toLowerCase()
+      const productFilter = (url.searchParams.get('product') || '').trim()
+      const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10))
+      const limit = Math.min(200, Math.max(10, parseInt(url.searchParams.get('limit') || '50', 10)))
+      const offset = (page - 1) * limit
+
+      let stats = {
+        total: 0,
+        leads: 0,
+        customers: 0,
+        waitlist: 0,
+        unsubscribed: 0,
+        totalLtvCents: 0,
+      }
+
+      let contacts = []
+      let totalFiltered = 0
+
+      try {
+        const statsRow = await env.DB.prepare(`
+          SELECT
+            COUNT(*) AS total,
+            COUNT(CASE WHEN is_customer = 0 AND status = 'subscribed' THEN 1 END) AS leads,
+            COUNT(CASE WHEN is_customer = 1 THEN 1 END) AS customers,
+            COUNT(CASE WHEN waitlists_joined != '[]' AND waitlists_joined != '' THEN 1 END) AS waitlist,
+            COUNT(CASE WHEN status = 'unsubscribed' THEN 1 END) AS unsubscribed,
+            COALESCE(SUM(total_spend_cents), 0) AS totalLtvCents
+          FROM audience_contacts
+        `).first()
+
+        if (statsRow) {
+          stats = {
+            total: Number(statsRow.total || 0),
+            leads: Number(statsRow.leads || 0),
+            customers: Number(statsRow.customers || 0),
+            waitlist: Number(statsRow.waitlist || 0),
+            unsubscribed: Number(statsRow.unsubscribed || 0),
+            totalLtvCents: Number(statsRow.totalLtvCents || 0),
+          }
+        }
+
+        const whereClauses = []
+        const params = []
+
+        if (segment === 'leads') {
+          whereClauses.push("is_customer = 0 AND status = 'subscribed'")
+        } else if (segment === 'customers') {
+          whereClauses.push("is_customer = 1")
+        } else if (segment === 'waitlist') {
+          whereClauses.push("waitlists_joined != '[]' AND waitlists_joined != ''")
+        } else if (segment === 'unsubscribed') {
+          whereClauses.push("status = 'unsubscribed'")
+        }
+
+        if (search) {
+          whereClauses.push("(LOWER(email) LIKE ? OR LOWER(name) LIKE ?)")
+          params.push(`%${search}%`, `%${search}%`)
+        }
+
+        if (productFilter) {
+          whereClauses.push("(products_owned LIKE ? OR waitlists_joined LIKE ?)")
+          params.push(`%${productFilter}%`, `%${productFilter}%`)
+        }
+
+        const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : ''
+
+        const countQuery = `SELECT COUNT(*) AS total FROM audience_contacts ${whereSql}`
+        const countRow = params.length > 0
+          ? await env.DB.prepare(countQuery).bind(...params).first()
+          : await env.DB.prepare(countQuery).first()
+        totalFiltered = Number(countRow?.total || 0)
+
+        const listQuery = `
+          SELECT id, email, user_id, name, avatar_url, source, status,
+                 is_customer, total_spend_cents, orders_count,
+                 products_owned, waitlists_joined, last_seen_at, created_at
+          FROM audience_contacts
+          ${whereSql}
+          ORDER BY created_at DESC
+          LIMIT ? OFFSET ?
+        `
+        const listRows = await env.DB.prepare(listQuery).bind(...params, limit, offset).all()
+        contacts = (listRows.results || []).map((row) => ({
+          id: row.id,
+          email: row.email,
+          userId: row.user_id,
+          name: row.name,
+          avatarUrl: row.avatar_url,
+          source: row.source,
+          status: row.status,
+          isCustomer: Boolean(row.is_customer),
+          totalSpendCents: Number(row.total_spend_cents || 0),
+          ordersCount: Number(row.orders_count || 0),
+          productsOwned: parseJsonSafe(row.products_owned, []),
+          waitlistsJoined: parseJsonSafe(row.waitlists_joined, []),
+          lastSeenAt: row.last_seen_at,
+          createdAt: row.created_at,
+        }))
+      } catch (err) {
+        logEvent('warn', 'marketing.audience_query_failed', { error: err.message })
+      }
+
+      return json(request, env, {
+        stats,
+        contacts,
+        total: totalFiltered,
+        page,
+        limit,
+        totalPages: Math.ceil(totalFiltered / limit) || 1,
+      }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (path === '/admin/marketing/audience/export' && request.method === 'GET') {
+      const segment = url.searchParams.get('segment') || 'all'
+      let whereSql = ''
+      if (segment === 'leads') whereSql = "WHERE is_customer = 0 AND status = 'subscribed'"
+      else if (segment === 'customers') whereSql = "WHERE is_customer = 1"
+      else if (segment === 'waitlist') whereSql = "WHERE waitlists_joined != '[]' AND waitlists_joined != ''"
+      else if (segment === 'unsubscribed') whereSql = "WHERE status = 'unsubscribed'"
+
+      let rows = { results: [] }
+      try {
+        rows = await env.DB.prepare(`
+          SELECT email, name, source, status, is_customer, total_spend_cents, orders_count,
+                 products_owned, waitlists_joined, created_at, last_seen_at
+          FROM audience_contacts
+          ${whereSql}
+          ORDER BY created_at DESC
+        `).all()
+      } catch {}
+
+      const escapeCsv = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`
+      const lines = ['Email,Name,Source,Status,Segment,Total Spend (USD),Orders Count,Products Owned,Waitlists,Joined At,Last Seen At']
+      for (const r of rows.results || []) {
+        const owned = parseJsonSafe(r.products_owned, []).join('; ')
+        const waitlists = parseJsonSafe(r.waitlists_joined, []).join('; ')
+        const spend = (Number(r.total_spend_cents || 0) / 100).toFixed(2)
+        const seg = r.is_customer ? 'Customer' : 'Lead'
+        lines.push([
+          escapeCsv(r.email),
+          escapeCsv(r.name),
+          escapeCsv(r.source),
+          escapeCsv(r.status),
+          escapeCsv(seg),
+          escapeCsv(`$${spend}`),
+          escapeCsv(r.orders_count || 0),
+          escapeCsv(owned),
+          escapeCsv(waitlists),
+          escapeCsv(r.created_at),
+          escapeCsv(r.last_seen_at),
+        ].join(','))
+      }
+      return new Response(lines.join('\n'), {
+        headers: {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': `attachment; filename="runway-audience-${segment}-${nowIso().slice(0, 10)}.csv"`,
+          'Cache-Control': 'no-store',
+          ...corsHeaders(request, env),
+          ...SECURITY_HEADERS,
+        },
+      })
+    }
+
+    if (path === '/admin/marketing/contacts' && request.method === 'POST') {
+      const body = await readJson(request)
+      const email = cleanText(body.email, 254, 'Email').toLowerCase().trim()
+      if (!email || !email.includes('@')) throw new HttpError(400, 'A valid email is required')
+      const name = cleanText(body.name, 100, 'Name', { required: false }) || ''
+      const source = cleanText(body.source, 40, 'Source', { required: false }) || 'manual'
+
+      await recordAudienceContact(env, { email, name, source })
+      await writeAuditLog(env, request, ownerUser, 'marketing.contact_create', { entityType: 'contact', entityId: email, details: { name, source } })
+      return json(request, env, { ok: true, message: 'Contact saved successfully' }, 201, { 'Cache-Control': 'no-store' })
+    }
+
+    match = routeMatch(path, /^\/admin\/marketing\/contacts\/([^/]+)$/)
+    if (match && request.method === 'PATCH') {
+      const contactId = decodeURIComponent(match[1])
+      const body = await readJson(request)
+      const allowedStatuses = ['subscribed', 'unsubscribed']
+      if (body.status && !allowedStatuses.includes(body.status)) throw new HttpError(400, 'Invalid status')
+
+      const existing = await env.DB.prepare('SELECT id, email FROM audience_contacts WHERE id = ?').bind(contactId).first()
+      if (!existing) throw new HttpError(404, 'Contact not found')
+
+      const nextName = body.name !== undefined ? cleanText(body.name, 100, 'Name', { required: false }) : null
+      const nextStatus = body.status || null
+
+      if (nextStatus) {
+        await env.DB.prepare('UPDATE audience_contacts SET status = ? WHERE id = ?').bind(nextStatus, contactId).run()
+      }
+      if (nextName !== null) {
+        await env.DB.prepare('UPDATE audience_contacts SET name = ? WHERE id = ?').bind(nextName, contactId).run()
+      }
+
+      await writeAuditLog(env, request, ownerUser, 'marketing.contact_update', { entityType: 'contact', entityId: existing.email, details: body })
+      return json(request, env, { ok: true, message: 'Contact updated' }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (match && request.method === 'DELETE') {
+      const contactId = decodeURIComponent(match[1])
+      const existing = await env.DB.prepare('SELECT id, email FROM audience_contacts WHERE id = ?').bind(contactId).first()
+      if (!existing) throw new HttpError(404, 'Contact not found')
+      await env.DB.prepare('DELETE FROM audience_contacts WHERE id = ?').bind(contactId).run()
+      await writeAuditLog(env, request, ownerUser, 'marketing.contact_delete', { entityType: 'contact', entityId: existing.email })
+      return json(request, env, { ok: true, message: 'Contact deleted' }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (path === '/admin/marketing/campaigns' && request.method === 'GET') {
+      let rows = { results: [] }
+      try {
+        rows = await env.DB.prepare(`
+          SELECT id, title, subject, preview_text AS previewText, target_segment AS targetSegment,
+                 target_product_key AS targetProductKey, cta_label AS ctaLabel, cta_url AS ctaUrl,
+                 discount_code AS discountCode, recipient_count AS recipientCount, sent_by AS sentBy, sent_at AS sentAt
+          FROM marketing_campaigns
+          ORDER BY sent_at DESC
+          LIMIT 50
+        `).all()
+      } catch {}
+      return json(request, env, rows.results || [], 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (path === '/admin/marketing/campaigns/test' && request.method === 'POST') {
+      const body = await readJson(request)
+      const recipient = env.OWNER_EMAIL || 'runwaysystems.cloud@gmail.com'
+      const subject = cleanText(body.subject, 150, 'Subject')
+      const eyebrow = cleanText(body.eyebrow, 80, 'Eyebrow', { required: false }) || 'RUNWAY SYSTEMS · VIP PREVIEW'
+      const rawMessage = cleanText(body.message, 5000, 'Message')
+      const discountCode = cleanText(body.discountCode, 30, 'Discount code', { required: false }) || ''
+      const ctaLabel = cleanText(body.ctaLabel, 60, 'CTA Label', { required: false }) || ''
+      const ctaUrl = cleanText(body.ctaUrl, 500, 'CTA URL', { required: false }) || ''
+      const targetProductKey = cleanText(body.targetProductKey, 60, 'Target product key', { required: false }) || ''
+
+      let product = null
+      if (targetProductKey) {
+        try {
+          const pRow = await env.DB.prepare('SELECT * FROM products WHERE key = ?').bind(targetProductKey).first()
+          if (pRow) product = productRowToConfig(pRow)
+        } catch {}
+      }
+
+      const dummyContact = { name: 'Owner Preview', email: recipient }
+      const personalizedSubject = renderMarketingTemplate(subject, dummyContact, product)
+      const personalizedMessage = renderMarketingTemplate(rawMessage, dummyContact, product)
+      const formattedBody = formatMarketingBodyToHtml(personalizedMessage)
+      const footerText = `This is a test preview sent to the store owner (${recipient}).\nFrom: ${env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud'}`
+
+      const html = marketingEmailLayout({
+        title: personalizedSubject,
+        eyebrow: `${eyebrow} [TEST PREVIEW]`,
+        bodyHtml: formattedBody,
+        discountCode,
+        actionLabel: ctaLabel,
+        actionUrl: ctaUrl || getPrimaryOrigin(env),
+        footerText,
+        unsubscribeUrl: `${getPrimaryOrigin(env)}/unsubscribe`,
+      })
+
+      await sendBrevo(env, {
+        to: recipient,
+        from: env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud',
+        fromName: 'Runway Systems',
+        subject: `[TEST PREVIEW] ${personalizedSubject}`,
+        html,
+      })
+
+      await writeAuditLog(env, request, ownerUser, 'marketing.test_email', { entityType: 'campaign', entityId: 'test', details: { recipient, subject } })
+      return json(request, env, { ok: true, message: `Test email sent to ${recipient}` }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (path === '/admin/marketing/campaigns/broadcast' && request.method === 'POST') {
+      const body = await readJson(request)
+      const title = cleanText(body.title, 100, 'Campaign Title', { required: false }) || cleanText(body.subject, 100, 'Subject')
+      const subject = cleanText(body.subject, 150, 'Subject')
+      const eyebrow = cleanText(body.eyebrow, 80, 'Eyebrow', { required: false }) || 'RUNWAY SYSTEMS · VIP ANNOUNCEMENT'
+      const rawMessage = cleanText(body.message, 5000, 'Message')
+      const targetSegment = cleanText(body.targetSegment, 40, 'Target segment', { required: false }) || 'all'
+      const targetProductKey = cleanText(body.targetProductKey, 60, 'Target product key', { required: false }) || ''
+      const discountCode = cleanText(body.discountCode, 30, 'Discount code', { required: false }) || ''
+      const ctaLabel = cleanText(body.ctaLabel, 60, 'CTA Label', { required: false }) || ''
+      const ctaUrl = cleanText(body.ctaUrl, 500, 'CTA URL', { required: false }) || ''
+
+      let product = null
+      if (targetProductKey) {
+        try {
+          const pRow = await env.DB.prepare('SELECT * FROM products WHERE key = ?').bind(targetProductKey).first()
+          if (pRow) product = productRowToConfig(pRow)
+        } catch {}
+      }
+
+      let query = "SELECT id, email, name, user_id, products_owned FROM audience_contacts WHERE status = 'subscribed'"
+      const params = []
+
+      if (targetSegment === 'leads') {
+        query += ' AND is_customer = 0'
+      } else if (targetSegment === 'customers') {
+        query += ' AND is_customer = 1'
+      } else if (targetSegment === 'waitlist') {
+        if (targetProductKey) {
+          query += ' AND waitlists_joined LIKE ?'
+          params.push(`%${targetProductKey}%`)
+        } else {
+          query += " AND waitlists_joined != '[]' AND waitlists_joined != ''"
+        }
+      }
+
+      let recipients = []
+      try {
+        const rows = params.length > 0
+          ? await env.DB.prepare(query).bind(...params).all()
+          : await env.DB.prepare(query).all()
+        recipients = rows.results || []
+      } catch (err) {
+        throw new HttpError(500, `Failed to load recipients: ${err.message}`)
+      }
+
+      if (!recipients.length) {
+        throw new HttpError(400, 'No eligible subscribed recipients found for this target segment.')
+      }
+
+      let sentCount = 0
+      const origin = getPrimaryOrigin(env)
+
+      for (const contact of recipients) {
+        try {
+          const personalizedSubject = renderMarketingTemplate(subject, contact, product)
+          const personalizedMessage = renderMarketingTemplate(rawMessage, contact, product)
+          const formattedBody = formatMarketingBodyToHtml(personalizedMessage)
+          const unsubscribeUrl = `${origin}/unsubscribe?email=${encodeURIComponent(contact.email)}`
+          const footerText = `You received this email because you have a Runway Systems account or joined our waitlist.\nFrom: ${env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud'}`
+
+          const html = marketingEmailLayout({
+            title: personalizedSubject,
+            eyebrow,
+            bodyHtml: formattedBody,
+            discountCode,
+            actionLabel: ctaLabel,
+            actionUrl: ctaUrl || origin,
+            footerText,
+            unsubscribeUrl,
+          })
+
+          await sendBrevo(env, {
+            to: contact.email,
+            from: env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud',
+            fromName: 'Runway Systems',
+            subject: personalizedSubject,
+            html,
+          })
+          sentCount += 1
+        } catch (mailError) {
+          logEvent('warn', 'marketing.broadcast_item_failed', { error: mailError.message, email: contact.email })
+        }
+      }
+
+      const campaignId = makeId('campaign')
+      const now = nowIso()
+      try {
+        await env.DB.prepare(`
+          INSERT INTO marketing_campaigns (
+            id, title, subject, preview_text, target_segment, target_product_key,
+            cta_label, cta_url, discount_code, recipient_count, sent_by, sent_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          campaignId,
+          title,
+          subject,
+          eyebrow,
+          targetSegment,
+          targetProductKey,
+          ctaLabel,
+          ctaUrl,
+          discountCode,
+          sentCount,
+          ownerUser.email || 'owner',
+          now,
+        ).run()
+      } catch {}
+
+      await writeAuditLog(env, request, ownerUser, 'marketing.broadcast', {
+        entityType: 'campaign',
+        entityId: campaignId,
+        details: { title, targetSegment, sentCount, totalTargeted: recipients.length },
+      })
+
+      return json(request, env, {
+        ok: true,
+        campaignId,
+        sentCount,
+        totalQueued: recipients.length,
+        message: `Campaign broadcast dispatched to ${sentCount} recipients via Brevo.`,
+      }, 200, { 'Cache-Control': 'no-store' })
+    }
+
     if (path === '/admin/testimonials' && request.method === 'GET') {
       const status = url.searchParams.get('status') || 'all'
       const allowed = ['all', 'pending', 'approved', 'rejected']
