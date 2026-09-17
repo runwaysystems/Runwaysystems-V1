@@ -24,6 +24,8 @@ import {
   ProblemSolution,
   ProductFAQ,
   ProductHero,
+  ProductWaitlist,
+  ProductDemo,
   ProductPricing,
   ProductProofStrip,
   ProductTour,
@@ -45,6 +47,7 @@ function resolveMediaUrls(viewModel) {
   for (const feature of viewModel.featureVisuals || []) {
     feature.imagePath = resolveMediaSrc(feature.imagePath)
   }
+  viewModel.demoVideo = resolveMediaSrc(viewModel.demoVideo)
   return viewModel
 }
 
@@ -94,7 +97,7 @@ export default function ProductPage({ theme, onToggleTheme, palette, onPaletteCh
             url: `${window.location.origin}${canonicalPath}`,
             priceCurrency: 'USD',
             price: priceNumber(offer.displaySalePrice),
-            availability: 'https://schema.org/InStock',
+            availability: product.availability === 'coming_soon' ? 'https://schema.org/PreOrder' : 'https://schema.org/InStock',
           },
         },
       },
@@ -186,10 +189,12 @@ export default function ProductPage({ theme, onToggleTheme, palette, onPaletteCh
       <Navbar product={product} onBuy={onBuy} theme={theme} onToggleTheme={onToggleTheme} palette={palette} onPaletteChange={onPaletteChange} offer={product.offer} />
       <main id="main">
         <ProductHero product={product} offer={product.offer} onToggleCart={onToggleCart} inCart={inCart} />
+        <ProductWaitlist product={product} />
         <ProductProofStrip product={product} />
         <FeatureTicker labels={product.ticker} />
         <ProblemSolution product={product} />
         <ProductTour product={product} />
+        <ProductDemo product={product} />
         {product.featureVisuals?.length ? <VisualFeatureShowcase product={product} /> : <FeatureGrid product={product} />}
         <HowItWorks product={product} />
         <Benefits product={product} />

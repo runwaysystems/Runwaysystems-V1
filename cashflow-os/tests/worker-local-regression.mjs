@@ -955,6 +955,130 @@ if (OWNER_TOKEN) {
   check('a truthy string does not count as consent', truthyConsent.response.status === 400, `${truthyConsent.response.status}`)
 }
 
+// ------------------------------------------------ launch lifecycle
+// Coming-soon products are public previews, not buyable products. A specific
+// Notify Me request must create a durable product waitlist entry; publishing
+// must queue one launch campaign exactly once; and the unsubscribe token must
+// suppress both the campaign recipient and the product subscription.
+if (OWNER_TOKEN) {
+  const ownerHeaders = { Authorization: `Bearer ${OWNER_TOKEN}` }
+  const launchKey = `launch-product-${Date.now()}`
+  const launchProduct = await request('/admin/products', {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: {
+      key: launchKey,
+      name: 'Launch Lifecycle Product',
+      tagline: 'A public product preview.',
+      category: 'Planning',
+      icon: 'calendar',
+      accent: 'violet',
+      lemonVariantId: '4242',
+      active: true,
+      availability: 'coming_soon',
+      launchAt: '2030-01-15',
+      allowComingSoonCart: true,
+      includes: ['A complete launch workflow'],
+      sortOrder: 90,
+    },
+  })
+  check('owner can publish a public coming-soon product with launch controls', launchProduct.response.status === 201
+    && launchProduct.payload?.availability === 'coming_soon'
+    && launchProduct.payload?.allowComingSoonCart === true
+    && launchProduct.payload?.launchAt === '2030-01-15', `${launchProduct.response.status} ${launchProduct.text.slice(0, 180)}`)
+
+  const comingSoonConfig = await request('/config/public')
+  const comingSoonPublic = (comingSoonConfig.payload?.products || []).find((product) => product.key === launchKey)
+  check('coming-soon products remain public but are never checkout-ready', comingSoonPublic?.availability === 'coming_soon'
+    && comingSoonPublic?.allowComingSoonCart === true
+    && comingSoonPublic?.checkoutReady === false, JSON.stringify(comingSoonPublic || null).slice(0, 220))
+
+  const launchWaitlist = await request(`/products/${launchKey}/waitlist`, {
+    method: 'POST',
+    body: { email: 'launch-tester@example.test', notifyConsent: true, marketingConsent: true },
+  })
+  check('product Notify Me records explicit launch and optional marketing consent', launchWaitlist.response.status === 202
+    && launchWaitlist.payload?.accepted === true, `${launchWaitlist.response.status} ${launchWaitlist.text}`)
+
+  const mp4 = Buffer.alloc(512)
+  mp4.write('ftyp', 4, 'ascii')
+  const demoUpload = await request(`/admin/products/${launchKey}/demo-video`, {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: { video: `data:video/mp4;base64,${mp4.toString('base64')}` },
+  })
+  const demoPath = demoUpload.payload?.demoVideo || ''
+  check('owner can upload a product MP4 demo into Worker media storage', demoUpload.response.status === 201
+    && new RegExp(`^/media/${launchKey}/[a-f0-9-]{36}\\.mp4$`).test(demoPath), `${demoUpload.response.status} ${demoUpload.text.slice(0, 180)}`)
+
+  const demoRange = await request(demoPath || `/media/${launchKey}/missing.mp4`, { headers: { Range: 'bytes=0-31' } })
+  check('product demo media supports byte ranges for efficient playback', demoRange.response.status === 206
+    && demoRange.response.headers.get('Accept-Ranges') === 'bytes'
+    && demoRange.response.headers.get('Content-Range') === 'bytes 0-31/512'
+    && demoRange.response.headers.get('Content-Length') === '32', `${demoRange.response.status} ${demoRange.text.slice(0, 120)}`)
+
+  const published = await request(`/admin/products/${launchKey}`, {
+    method: 'PATCH',
+    headers: ownerHeaders,
+    body: {
+      key: launchKey,
+      name: 'Launch Lifecycle Product',
+      tagline: 'A public product preview.',
+      category: 'Planning',
+      icon: 'calendar',
+      accent: 'violet',
+      lemonVariantId: '4242',
+      deliveryUrl: '',
+      offerActive: true,
+      offerLabel: 'Launch Offer',
+      originalPrice: '$69',
+      salePrice: '$39',
+      active: true,
+      availability: 'live',
+      launchAt: '2030-01-15',
+      allowComingSoonCart: false,
+      featured: false,
+      sortOrder: 90,
+      includes: ['A complete launch workflow'],
+    },
+  })
+  check('publishing a coming-soon product queues its specific launch audience once', published.response.status === 200
+    && published.payload?.availability === 'live'
+    && published.payload?.launchNotificationsQueued === 1, `${published.response.status} ${published.text.slice(0, 220)}`)
+
+  const repeatPublish = await request(`/admin/products/${launchKey}`, {
+    method: 'PATCH',
+    headers: ownerHeaders,
+    body: { ...published.payload, availability: 'live', active: true, lemonVariantId: '4242', deliveryUrl: '' },
+  })
+  check('a subsequent live save does not queue duplicate launch notifications', repeatPublish.response.status === 200
+    && repeatPublish.payload?.launchNotificationsQueued === 0, `${repeatPublish.response.status} ${repeatPublish.text.slice(0, 180)}`)
+
+  const marketingBeforeUnsubscribe = await request('/admin/marketing/overview', { headers: ownerHeaders })
+  const launchContact = (marketingBeforeUnsubscribe.payload?.contacts || []).find((contact) => contact.email === 'launch-tester@example.test')
+  const launchCampaign = (marketingBeforeUnsubscribe.payload?.campaigns || []).find((campaign) => campaign.kind === 'launch' && campaign.productKey === launchKey)
+  check('admin marketing overview exposes consented contacts and queued launch campaign status', marketingBeforeUnsubscribe.response.status === 200
+    && marketingBeforeUnsubscribe.payload?.counts?.subscribers >= 1
+    && marketingBeforeUnsubscribe.payload?.counts?.waitlist >= 1
+    && launchContact?.marketingConsent === true
+    && launchCampaign?.recipientCount === 1
+    && launchCampaign?.ctaUrl === `${APP_ORIGIN}/products/${launchKey}`, `${marketingBeforeUnsubscribe.response.status} ${marketingBeforeUnsubscribe.text.slice(0, 280)}`)
+
+  const unsubscribeSignature = createHmac('sha256', 'ci-local-marketing-signing-secret-replace')
+    .update(launchContact?.id || '').digest('base64url')
+  const unsubscribe = await request(`/unsubscribe?token=${encodeURIComponent(`${launchContact?.id || ''}.${unsubscribeSignature}`)}`, { method: 'POST' })
+  const marketingAfterUnsubscribe = await request('/admin/marketing/overview', { headers: ownerHeaders })
+  check('one-click unsubscribe withdraws marketing and product-launch delivery eligibility', unsubscribe.response.status === 200
+    && unsubscribe.payload?.unsubscribed === true
+    && marketingAfterUnsubscribe.payload?.counts?.subscribers === 0
+    && marketingAfterUnsubscribe.payload?.counts?.waitlist === 0, `${unsubscribe.response.status} ${unsubscribe.text.slice(0, 180)}`)
+
+  const demoRemoved = await request(`/admin/products/${launchKey}/demo-video`, { method: 'DELETE', headers: ownerHeaders })
+  check('owner can remove a product demo video', demoRemoved.response.status === 200 && demoRemoved.payload?.demoVideo === '', `${demoRemoved.response.status} ${demoRemoved.text.slice(0, 160)}`)
+
+  await request(`/admin/products/${launchKey}`, { method: 'DELETE', headers: ownerHeaders })
+}
+
 // ----------------------------------------------------------- duplication
 // Duplicating a product copies its written content but must never inherit
 // commercial wiring or media, which are per-product.

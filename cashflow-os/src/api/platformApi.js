@@ -116,6 +116,8 @@ function emptyState() {
     settings: clone(defaultSettings),
     products: [],
     bundles: [],
+    contacts: [],
+    campaigns: [],
   }
 }
 
@@ -345,6 +347,84 @@ export async function getPublicConfig() {
     paymentProvider: 'lemonsqueezy',
     reviewPolicy: 'neutral-all-verified-buyers',
   }
+}
+
+export async function submitProductWaitlist(productKey, input = {}) {
+  const key = String(productKey || '').trim()
+  if (!key) throw new Error('A product is required for launch notifications.')
+  if (API_BASE_URL) return request(`/products/${encodeURIComponent(key)}/waitlist`, { method: 'POST', body: input })
+  await wait(220)
+  const email = String(input.email || '').trim().toLowerCase()
+  if (!/^\S+@\S+\.\S+$/.test(email)) throw new Error('Enter a valid email address.')
+  if (input.notifyConsent !== true) throw new Error('Confirm the launch notification consent to continue.')
+  const state = readMockState()
+  const now = new Date().toISOString()
+  const existing = (state.contacts || []).find((item) => item.email === email)
+  const contact = existing || { id: makeId('contact'), email, name: '', firstSource: 'waitlist', createdAt: now }
+  contact.lastSource = 'waitlist'
+  contact.marketingConsent = input.marketingConsent === true || Boolean(contact.marketingConsent)
+  contact.updatedAt = now
+  state.contacts = existing ? state.contacts.map((item) => item.email === email ? contact : item) : [...(state.contacts || []), contact]
+  writeMockState(state)
+  return { accepted: true, message: 'You are on the launch list.' }
+}
+
+export async function syncSelfContact({ token } = {}) {
+  if (API_BASE_URL) return request('/contacts/self', { method: 'POST', body: {}, token })
+  return { contact: null, preview: true }
+}
+
+export async function getAccountEmailPreferences({ token } = {}) {
+  if (API_BASE_URL) return request('/account/email-preferences', { token })
+  await wait(120)
+  return { email: '', marketingConsent: false, consentedAt: '', unsubscribedAt: '' }
+}
+
+export async function updateAccountEmailPreferences(marketingConsent, { token } = {}) {
+  if (API_BASE_URL) return request('/account/email-preferences', { method: 'PUT', body: { marketingConsent: marketingConsent === true }, token })
+  await wait(160)
+  return { email: '', marketingConsent: marketingConsent === true, consentedAt: marketingConsent ? new Date().toISOString() : '', unsubscribedAt: marketingConsent ? '' : new Date().toISOString() }
+}
+
+export async function unsubscribeFromMarketing(token) {
+  if (!token) throw new Error('This unsubscribe link is incomplete.')
+  if (API_BASE_URL) return request(`/unsubscribe?token=${encodeURIComponent(token)}`, { method: 'POST', body: {} })
+  return { unsubscribed: true, preview: true }
+}
+
+export async function getMarketingOverview({ token } = {}) {
+  if (API_BASE_URL) return request('/admin/marketing/overview', { token })
+  await wait(150)
+  const state = readMockState()
+  const contacts = state.contacts || []
+  return {
+    counts: {
+      contacts: contacts.length,
+      subscribers: contacts.filter((item) => item.marketingConsent && !item.unsubscribedAt).length,
+      customers: contacts.filter((item) => item.lastSource === 'purchase').length,
+      waitlist: contacts.filter((item) => item.lastSource === 'waitlist').length,
+    },
+    contacts: contacts.slice(-12).reverse(),
+    campaigns: state.campaigns || [],
+  }
+}
+
+export async function createMarketingCampaign(input, { token } = {}) {
+  if (API_BASE_URL) return request('/admin/marketing/campaigns', { method: 'POST', body: input, token })
+  await wait(220)
+  const state = readMockState()
+  const audience = input.audience || 'subscribers'
+  const contacts = (state.contacts || []).filter((item) => item.marketingConsent && !item.unsubscribedAt)
+  const campaign = {
+    id: makeId('campaign'), kind: 'marketing', audience, productKey: input.productKey || '',
+    subject: String(input.subject || '').trim(), preheader: String(input.preheader || '').trim(), body: String(input.body || '').trim(),
+    ctaLabel: String(input.ctaLabel || '').trim(), ctaUrl: String(input.ctaUrl || '').trim(),
+    status: contacts.length ? 'queued' : 'completed', recipientCount: contacts.length, sentCount: 0, failedCount: 0, skippedCount: 0, createdAt: new Date().toISOString(),
+  }
+  if (!campaign.subject || !campaign.body) throw new Error('Subject and message are required.')
+  state.campaigns = [campaign, ...(state.campaigns || [])]
+  writeMockState(state)
+  return campaign
 }
 
 export async function trackPageView(path) {
@@ -656,6 +736,33 @@ export async function uploadProductImage(productKey, { slot, image } = {}, { tok
     features.push(feature)
     products[index] = { ...products[index], features, featureImages: features.map((item) => item.imagePath) }
   }
+  state.products = products
+  writeMockState(state)
+  return products[index]
+}
+
+export async function uploadProductDemoVideo(productKey, { video } = {}, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/products/${encodeURIComponent(productKey)}/demo-video`, { method: 'POST', body: { video }, token })
+  await wait(420)
+  if (!video || !String(video).startsWith('data:video/')) throw new Error('Video must be an MP4 or WebM file.')
+  const state = readMockState()
+  const products = state.products || []
+  const index = products.findIndex((item) => item.key === productKey)
+  if (index === -1) throw new Error('Product not found')
+  products[index] = { ...products[index], demoVideo: video }
+  state.products = products
+  writeMockState(state)
+  return products[index]
+}
+
+export async function deleteProductDemoVideo(productKey, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/products/${encodeURIComponent(productKey)}/demo-video`, { method: 'DELETE', token })
+  await wait(180)
+  const state = readMockState()
+  const products = state.products || []
+  const index = products.findIndex((item) => item.key === productKey)
+  if (index === -1) throw new Error('Product not found')
+  products[index] = { ...products[index], demoVideo: '' }
   state.products = products
   writeMockState(state)
   return products[index]

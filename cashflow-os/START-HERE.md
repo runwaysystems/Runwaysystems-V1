@@ -63,6 +63,10 @@ version:
    npx wrangler secret put GOOGLE_SHEETS_COPY_URL --config worker/wrangler.toml
    npx wrangler secret put RATE_LIMIT_SALT --config worker/wrangler.toml
    npx wrangler secret put FEEDBACK_SIGNING_SECRET --config worker/wrangler.toml
+# Dedicated HMAC key for unsubscribe links (falls back to FEEDBACK_SIGNING_SECRET only during a staged rotation).
+npx wrangler secret put MARKETING_SIGNING_SECRET --config worker/wrangler.toml
+# Recommended: re-check webhook ownership with Supabase Admin API.
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --config worker/wrangler.toml
    ```
 
 6. `npx wrangler deploy --config worker/wrangler.toml`

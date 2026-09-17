@@ -18,6 +18,19 @@ function fileToDataUrl(blob) {
   })
 }
 
+export async function processVideoFile(file) {
+  const allowed = ['video/mp4', 'video/webm']
+  if (!file || !allowed.includes(String(file.type || '').toLowerCase())) {
+    throw new Error('Choose an MP4 or WebM product demo video.')
+  }
+  // The Worker accepts a 24 MB binary file; base64 adds roughly one third,
+  // so keep the browser source under that binary limit before reading it.
+  if (file.size > 24 * 1024 * 1024) {
+    throw new Error('Product demo videos must be 24 MB or smaller. Export a web-optimized MP4 or WebM and try again.')
+  }
+  return fileToDataUrl(file)
+}
+
 export async function processImageFile(file) {
   if (!file || !String(file.type || '').startsWith('image/')) {
     throw new Error('Please choose an image file.')

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { gsap } from 'gsap'
-import { ArrowRight, ArrowUpRight, Check, ChevronDown, Fingerprint, Layers, LockKeyhole, Plus, ShieldCheck, ShoppingBag, Sparkles } from 'lucide-react'
+import { ArrowRight, ArrowUpRight, Check, ChevronDown, Fingerprint, Layers, LockKeyhole, Mail, Plus, ShieldCheck, ShoppingBag, Sparkles } from 'lucide-react'
 import { buildProductViewModel, buildSuiteViewModel, CATALOG_ORDER, defaultProducts, SUITE_NAME } from '../data/catalog'
 import { dedupeProducts } from '../api/platformApi'
 import { catalogIsAuthoritative, storefrontProducts } from '../lib/catalogAvailability'
@@ -119,6 +119,8 @@ function ProductCard({ viewModel, inCart, onToggleCart }) {
   const quickY = useRef(null)
   const Icon = sectionIcon(viewModel.icon)
   const offer = viewModel.offer
+  const comingSoon = viewModel.availability === 'coming_soon'
+  const canSaveForLaunch = !comingSoon || viewModel.allowComingSoonCart
 
   // GSAP tilt via quickTo: one reusable tween per axis instead of spawning
   // a new tween on every pointermove, so hover stays silky on long catalogs.
@@ -173,10 +175,10 @@ function ProductCard({ viewModel, inCart, onToggleCart }) {
       onPointerLeave={resetCard}
       onPointerCancel={resetCard}
     >
-      <button
+      {canSaveForLaunch && <button
         className={cx('product-card__add', inCart && 'is-added')}
         type="button"
-        aria-label={inCart ? `Remove ${viewModel.name} from cart` : `Add ${viewModel.name} to cart`}
+        aria-label={inCart ? `Remove ${viewModel.name} from cart` : `${comingSoon ? 'Save' : 'Add'} ${viewModel.name} to cart`}
         aria-pressed={inCart}
         onClick={(event) => {
           event.preventDefault()
@@ -184,18 +186,17 @@ function ProductCard({ viewModel, inCart, onToggleCart }) {
           onToggleCart(viewModel.key)
         }}
       >
-        {inCart ? <><Check size={13} /> In cart</> : <><Plus size={13} /> Add</>}
-      </button>
+        {inCart ? <><Check size={13} /> {comingSoon ? 'Saved' : 'In cart'}</> : <>{comingSoon ? <Mail size={13} /> : <Plus size={13} />} {comingSoon ? 'Save' : 'Add'}</>}
+      </button>}
+      {comingSoon && <span className="product-card__coming"><Mail size={12} /> Coming soon</span>}
       <span className="product-card__icon"><Icon /></span>
       <span className="product-card__category">{viewModel.category}</span>
       <h3>{viewModel.name}</h3>
       <p>{viewModel.taglineLive || viewModel.hero?.lede || ''}</p>
       <div className="product-card__price">
-        {offer.offerActive && <s>{offer.displayOriginalPrice}</s>}
-        <strong>{offer.displaySalePrice}</strong>
-        <span>one-time</span>
+        {comingSoon ? <><strong>Coming soon</strong><span>join the launch list</span></> : <>{offer.offerActive && <s>{offer.displayOriginalPrice}</s>}<strong>{offer.displaySalePrice}</strong><span>one-time</span></>}
       </div>
-      <span className="product-card__cta">View product <ArrowUpRight size={15} /></span>
+      <span className="product-card__cta">{comingSoon ? 'Preview & notify me' : 'View product'} <ArrowUpRight size={15} /></span>
     </Link>
   )
 }
@@ -277,11 +278,11 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
     }
   }, [config, suiteVm.proof, viewModels])
 
-  const bundleTotal = viewModels.reduce((sum, product) => sum + priceNumber(product.offer?.displaySalePrice), 0)
+  const bundleTotal = viewModels.filter((product) => product.availability === 'live').reduce((sum, product) => sum + priceNumber(product.offer?.displaySalePrice), 0)
   const cartHas = (key) => has(key)
   const toggleCart = (key) => toggle(key)
   const addCompleteSuite = () => {
-    for (const product of viewModels) add(product.key)
+    for (const product of viewModels) { if (product.availability === 'live' || product.allowComingSoonCart) add(product.key) }
   }
 
   const bundles = useMemo(() => config?.bundles || [], [config])
@@ -343,7 +344,7 @@ export default function CatalogHome({ theme, onToggleTheme, palette, onPaletteCh
             {/* Hiding every product is a valid state (a store between launches),
                 so the suite banner and its $0.00 total are suppressed rather
                 than advertising an empty bundle. */}
-            {viewModels.length > 1 && (
+            {viewModels.filter((product) => product.availability === 'live').length > 1 && (
               <div className="suite-bundle-banner reveal">
                 <div className="suite-bundle-banner__copy">
                   <p className="eyebrow">{suiteVm.bundle.eyebrow}</p>

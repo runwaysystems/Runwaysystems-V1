@@ -87,10 +87,13 @@ npx wrangler secret put BREVO_API_KEY --config worker/wrangler.toml
 npx wrangler secret put GOOGLE_SHEETS_COPY_URL --config worker/wrangler.toml
 npx wrangler secret put RATE_LIMIT_SALT --config worker/wrangler.toml
 npx wrangler secret put FEEDBACK_SIGNING_SECRET --config worker/wrangler.toml
+# Dedicated HMAC key for unsubscribe links (falls back to FEEDBACK_SIGNING_SECRET only during a staged rotation).
+npx wrangler secret put MARKETING_SIGNING_SECRET --config worker/wrangler.toml
+# Recommended: re-check webhook ownership with Supabase Admin API.
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --config worker/wrangler.toml
 ```
 
-Generate `RATE_LIMIT_SALT` and `FEEDBACK_SIGNING_SECRET` as random strings
-of at least 32 bytes.
+Generate `RATE_LIMIT_SALT`, `FEEDBACK_SIGNING_SECRET`, and `MARKETING_SIGNING_SECRET` as distinct random strings of at least 32 bytes. `MARKETING_SIGNING_SECRET` signs email unsubscribe links. `SUPABASE_SERVICE_ROLE_KEY` is recommended for webhook ownership re-checks.
 
 **Optional: AI image scanning.** In the Cloudflare dashboard, open the
 Worker, go to **Settings → Bindings → Add**, and add a **Workers AI**

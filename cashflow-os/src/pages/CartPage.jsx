@@ -77,15 +77,17 @@ export default function CartPage({ theme, onToggleTheme, palette, onPaletteChang
     for (const key of unavailableKeys) remove(key)
   }, [remove, unavailableKeys])
 
-  const fullTotal = items.reduce((sum, item) => sum + priceNumber(item.offer?.displaySalePrice), 0)
+  const purchasableItems = items.filter((item) => item.availability !== 'coming_soon')
+  const savedForLaunchItems = items.filter((item) => item.availability === 'coming_soon')
+  const fullTotal = purchasableItems.reduce((sum, item) => sum + priceNumber(item.offer?.displaySalePrice), 0)
 
   // If the cart happens to hold exactly the members of an active bundle, the
   // bundle price applies automatically. The Worker re-verifies the match and
   // recomputes the amount, so this is presentation only.
   const matchedBundle = useMemo(() => {
-    const cartKeys = [...keys].sort().join(',')
+    const cartKeys = purchasableItems.map((item) => item.key).sort().join(',')
     return (config?.bundles || []).find((bundle) => [...bundle.productKeys].sort().join(',') === cartKeys) || null
-  }, [config, keys])
+  }, [config, purchasableItems])
 
   // A bundle whose products are all in the cart but alongside extras cannot be
   // discounted, because the Worker requires an exact match. Surface the best
@@ -93,11 +95,11 @@ export default function CartPage({ theme, onToggleTheme, palette, onPaletteChang
   // silently charging full price. Richest discount wins.
   const nearMissBundle = useMemo(() => {
     if (matchedBundle) return null
-    const cartKeys = new Set(keys)
+    const cartKeys = new Set(purchasableItems.map((item) => item.key))
     return (config?.bundles || [])
-      .filter((bundle) => bundle.productKeys.every((key) => cartKeys.has(key)) && bundle.productKeys.length < keys.length)
+      .filter((bundle) => bundle.productKeys.every((key) => cartKeys.has(key)) && bundle.productKeys.length < purchasableItems.length)
       .sort((a, b) => b.discountPercent - a.discountPercent)[0] || null
-  }, [config, keys, matchedBundle])
+  }, [config, purchasableItems, matchedBundle])
 
   const total = matchedBundle
     ? fullTotal * (100 - matchedBundle.discountPercent) / 100
@@ -111,8 +113,8 @@ export default function CartPage({ theme, onToggleTheme, palette, onPaletteChang
   }
 
   const checkout = () => {
-    if (!consented || !items.length || checkoutPending) return
-    startCheckout(items.map((item) => item.key), matchedBundle?.key || '')
+    if (!consented || !purchasableItems.length || checkoutPending) return
+    startCheckout(purchasableItems.map((item) => item.key), matchedBundle?.key || '')
   }
 
   // The whole cart becomes ONE Lemon Squeezy checkout: multi-product carts
@@ -160,19 +162,18 @@ export default function CartPage({ theme, onToggleTheme, palette, onPaletteChang
         ) : (
           <>
             <section className="cart-list" aria-label="Products in your cart">
+              {purchasableItems.length > 0 && <p className="cart-list__label">Ready to check out</p>}
               {items.map((item) => {
                 const Icon = sectionIcon(item.icon)
                 return (
-                  <article className={`cart-item cart-item--${item.accent}`} key={item.key}>
+                  <article className={`cart-item cart-item--${item.accent} ${item.availability === 'coming_soon' ? 'cart-item--saved' : ''}`} key={item.key}>
                     <span className="cart-item__icon" aria-hidden="true"><Icon size={18} /></span>
                     <div className="cart-item__identity">
                       <Link to={`/products/${item.key}`}><h2>{item.name}</h2></Link>
                       <p>{item.taglineLive || item.hero?.lede || ''}</p>
                     </div>
                     <div className="cart-item__price">
-                      {item.offer?.offerActive && <s>{item.offer.displayOriginalPrice}</s>}
-                      <strong>{item.offer?.displaySalePrice}</strong>
-                      <span>one-time</span>
+                      {item.availability === 'coming_soon' ? <><strong>Saved for launch</strong><span>not charged today</span></> : <>{item.offer?.offerActive && <s>{item.offer.displayOriginalPrice}</s>}<strong>{item.offer?.displaySalePrice}</strong><span>one-time</span></>}
                     </div>
                     <button className="cart-item__remove" type="button" aria-label={`Remove ${item.name} from cart`} onClick={() => remove(item.key)}>
                       <X size={16} />
@@ -181,6 +182,7 @@ export default function CartPage({ theme, onToggleTheme, palette, onPaletteChang
                 )
               })}
             </section>
+            {savedForLaunchItems.length > 0 && <p className="cart-launch-note"><ShoppingBag size={14} /> {savedForLaunchItems.length} saved-for-launch {savedForLaunchItems.length === 1 ? 'product is' : 'products are'} kept here for you. They stay out of today&apos;s checkout until they are live.</p>}
 
             <section className="cart-summary">
               <div className="cart-summary__copy">
@@ -203,7 +205,7 @@ export default function CartPage({ theme, onToggleTheme, palette, onPaletteChang
                     </button>
                   </div>
                 )}
-                <p><LockKeyhole size={13} /> One secure checkout for everything in your cart. Multi-product carts are billed as a single suite bundle.</p>
+                <p><LockKeyhole size={13} /> {purchasableItems.length ? 'One secure checkout for every product ready today. Multi-product carts are billed as a single suite bundle.' : 'Your saved-for-launch products will become payable here once they are live.'}</p>
                 <p className="cart-tax-note">
                   Lemon Squeezy handles sales tax as the merchant of record.
                 </p>
@@ -213,10 +215,10 @@ export default function CartPage({ theme, onToggleTheme, palette, onPaletteChang
                 className="button button--lime button--xl button--full"
                 type="button"
                 onClick={checkout}
-                disabled={checkoutPending || !consented}
+                disabled={checkoutPending || !consented || !purchasableItems.length}
                 aria-describedby="checkout-consent"
               >
-                {checkoutPending ? 'Opening secure checkout...' : <>Checkout securely <ArrowRight size={17} /></>}
+                {checkoutPending ? 'Opening secure checkout...' : purchasableItems.length ? <>Checkout securely <ArrowRight size={17} /></> : 'No products ready for checkout'}
               </button>
               <small>{copy.assurance}</small>
             </section>

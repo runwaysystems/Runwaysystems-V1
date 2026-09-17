@@ -24,6 +24,7 @@ import {
   Sparkles,
   Star,
   Trash2,
+  Video,
   X,
 } from 'lucide-react'
 import { Link, Navigate } from 'react-router-dom'
@@ -35,6 +36,7 @@ import {
   deleteAdminBundle,
   deleteAdminProduct,
   deleteProductFeature,
+  deleteProductDemoVideo,
   getAdminBundles,
   getAdminProducts,
   getAdminSettings,
@@ -46,10 +48,11 @@ import {
   updateAdminSettings,
   updateProductFeature,
   updateTestimonialStatus,
+  uploadProductDemoVideo,
   uploadProductImage,
 } from '../api/platformApi'
 import { CATALOG_ORDER } from '../data/catalog'
-import { processImageFile } from '../lib/imageProcessing'
+import { processImageFile, processVideoFile } from '../lib/imageProcessing'
 import AdminBundlesPanel from './AdminBundlesPanel'
 import ProductPreviewPane from './ProductPreviewPane'
 import AdminContentPanel from './AdminContentPanel'
@@ -64,6 +67,8 @@ import AdminTotpPrompt from '../components/AdminTotpPrompt'
 import AdminAuditLog from '../components/AdminAuditLog'
 import AdminDeliveryIssues from '../components/AdminDeliveryIssues'
 import AdminClientErrors from '../components/AdminClientErrors'
+import AdminMarketingPanel from '../components/AdminMarketingPanel'
+import { getMarketingOverview } from '../api/platformApi'
 
 const metricConfig = [
   { key: 'totalSales', label: 'Sales', icon: ShoppingBag, format: (value) => value.toLocaleString() },
@@ -356,10 +361,14 @@ const emptyProductDraft = (duplicateFrom = '') => ({
   offerLabel: '',
   offerActive: true,
   active: true,
+  availability: 'live',
+  launchAt: '',
+  allowComingSoonCart: false,
   featured: false,
   sortOrder: 10,
   includesText: '',
   heroImage: '',
+  demoVideo: '',
   featureImages: [],
   features: [],
 })
@@ -380,16 +389,20 @@ function draftFromProduct(product) {
     offerLabel: product.offerLabel || '',
     offerActive: Boolean(product.offerActive),
     active: Boolean(product.active),
+    availability: product.availability === 'coming_soon' ? 'coming_soon' : 'live',
+    launchAt: product.launchAt || '',
+    allowComingSoonCart: Boolean(product.allowComingSoonCart),
     featured: Boolean(product.featured),
     sortOrder: product.sortOrder || 0,
     includesText: (product.includes || []).join('\n'),
     heroImage: product.heroImage || '',
+    demoVideo: product.demoVideo || '',
     featureImages: Array.isArray(product.featureImages) ? [...product.featureImages] : [],
     features: Array.isArray(product.features) ? [...product.features] : [],
   }
 }
 
-function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onUploadMedia, onPatchMedia, onCreateFeature, onUpdateFeature, onDeleteFeature, mediaBusy, notify, aiStatus = 'setup' }) {
+function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onUploadMedia, onUploadVideo, onDeleteVideo, onPatchMedia, onCreateFeature, onUpdateFeature, onDeleteFeature, mediaBusy, notify, aiStatus = 'setup' }) {
   const [showPreview, setShowPreview] = useState(true)
   const [pendingDelete, setPendingDelete] = useState(null)
   const [confirmText, setConfirmText] = useState('')
@@ -431,6 +444,7 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
   const applyMedia = (saved) => setDraft((current) => current ? {
     ...current,
     heroImage: saved.heroImage || '',
+    demoVideo: saved.demoVideo || '',
     featureImages: Array.isArray(saved.featureImages) ? [...saved.featureImages] : [],
     features: Array.isArray(saved.features) ? [...saved.features] : current.features,
   } : current)
@@ -443,6 +457,26 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
       applyMedia(saved)
     } catch (error) {
       notify(error.message || 'The hero image could not be processed.')
+    }
+  }
+
+  const handleDemoVideoFile = async (file) => {
+    if (!file) return
+    try {
+      const video = await processVideoFile(file)
+      const saved = await onUploadVideo(draft.key, video)
+      applyMedia(saved)
+    } catch (error) {
+      notify(error.message || 'The product demo could not be uploaded.')
+    }
+  }
+
+  const removeDemoVideo = async () => {
+    try {
+      const saved = await onDeleteVideo(draft.key)
+      applyMedia(saved)
+    } catch (error) {
+      notify(error.message || 'The product demo could not be removed.')
     }
   }
 
@@ -602,6 +636,30 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
             </div>
           </fieldset>
 
+          <fieldset className="admin-settings-group admin-settings-group--launch">
+            <legend>Release & availability</legend>
+            <p className="admin-settings-group-copy">Keep a product public while it is coming soon. When you save it as live, every person on its launch list is queued a single notification from info@runwaysystems.cloud.</p>
+            <div className="admin-settings-group-grid">
+              <label className="portal-field">
+                <span>Storefront state</span>
+                <select value={draft.availability} onChange={(event) => update('availability', event.target.value)}>
+                  <option value="live">Live — ready to buy</option>
+                  <option value="coming_soon">Coming soon — public preview, no checkout</option>
+                </select>
+              </label>
+              <label className="portal-field">
+                <span>Planned launch date (optional)</span>
+                <input type="date" value={draft.launchAt ? String(draft.launchAt).slice(0, 10) : ''} onChange={(event) => update('launchAt', event.target.value)} />
+                <small>Shown on the public launch list. This does not publish the product automatically.</small>
+              </label>
+              <label className="toggle-setting">
+                <span><b>Allow save to cart while coming soon</b><small>Lets visitors keep this item in their cart. It is excluded from checkout until you make it live.</small></span>
+                <input type="checkbox" checked={draft.allowComingSoonCart} onChange={(event) => update('allowComingSoonCart', event.target.checked)} />
+                <i aria-hidden="true" />
+              </label>
+            </div>
+          </fieldset>
+
           <fieldset className="admin-settings-group admin-settings-group--display">
             <legend>What customers see</legend>
             <p className="admin-settings-group-copy">Display copy only. Confirm the visible price matches the amount behind the Lemon Squeezy variant.</p>
@@ -649,6 +707,20 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
               <legend>Product visuals</legend>
               <p className="admin-settings-group-copy">Screenshots are processed in the browser into sharp high-resolution WebP and stored in private media storage. Uploaded visuals replace the placeholder views on the product page.</p>
               <div className="media-editor">
+                <div className="media-editor__block media-editor__block--video">
+                  <p className="media-editor__title"><Video size={15} /> Product demo video <small>(MP4 or WebM, max 24 MB)</small></p>
+                  <div className={cx('media-video-frame', draft.demoVideo && 'has-video')}>
+                    {draft.demoVideo ? <video controls preload="metadata"><source src={draft.demoVideo} type={draft.demoVideo.endsWith('.webm') ? 'video/webm' : 'video/mp4'} /></video> : <span className="media-empty"><Video size={20} /> A short product walkthrough customers can watch before buying</span>}
+                    <div className="media-hero-actions">
+                      {draft.demoVideo && <button className="button button--dark button--small" type="button" onClick={removeDemoVideo} disabled={Boolean(mediaBusy)}><Trash2 size={13} /> Remove</button>}
+                      <label className="button button--small">
+                        {mediaBusy === 'video' ? 'Uploading...' : draft.demoVideo ? 'Replace' : 'Upload video'}
+                        <input type="file" hidden accept="video/mp4,video/webm" disabled={Boolean(mediaBusy)} onChange={(event) => { handleDemoVideoFile(event.target.files?.[0]); event.target.value = '' }} />
+                      </label>
+                    </div>
+                  </div>
+                  <small className="media-video-note">Videos are stored in Cloudflare R2 and served with browser seeking and immutable edge caching.</small>
+                </div>
                 <div className="media-editor__block">
                   <p className="media-editor__title">Hero dashboard screenshot</p>
                   <div className={cx('media-hero-frame', draft.heroImage && 'has-image')}>
@@ -836,6 +908,7 @@ export default function AdminDashboard() {
   const [products, setProducts] = useState([])
   const [settings, setSettings] = useState({})
   const [integrations, setIntegrations] = useState([])
+  const [marketing, setMarketing] = useState({ counts: {}, campaigns: [], contacts: [] })
   const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState('')
   const [moderatingId, setModeratingId] = useState('')
@@ -853,13 +926,14 @@ export default function AdminDashboard() {
   const loadDashboard = useCallback(async () => {
     setLoading(true)
     try {
-      const [analyticsData, testimonialData, productData, settingsData, integrationData, bundleData] = await Promise.all([
+      const [analyticsData, testimonialData, productData, settingsData, integrationData, bundleData, marketingData] = await Promise.all([
         getAnalytics(authOptions),
         getTestimonials(authOptions),
         getAdminProducts(authOptions),
         getAdminSettings(authOptions),
         getIntegrationStatus(authOptions),
         getAdminBundles(authOptions),
+        getMarketingOverview(authOptions),
       ])
       setAnalytics(analyticsData)
       setTestimonials(testimonialData)
@@ -867,6 +941,7 @@ export default function AdminDashboard() {
       setBundles(bundleData)
       setSettings(settingsData)
       setIntegrations(integrationData)
+      setMarketing(marketingData)
     } catch (error) {
       setNotice(error.message || 'Dashboard data could not be loaded.')
     } finally {
@@ -985,6 +1060,9 @@ export default function AdminDashboard() {
         offerLabel: draft.offerLabel,
         offerActive: draft.offerActive,
         active: draft.active,
+        availability: draft.availability,
+        launchAt: draft.launchAt,
+        allowComingSoonCart: draft.allowComingSoonCart,
         featured: draft.featured,
         sortOrder: Number(draft.sortOrder) || 0,
         includes: String(draft.includesText || '').split('\n').map((item) => item.trim()).filter(Boolean),
@@ -1067,6 +1145,38 @@ export default function AdminDashboard() {
       return saved
     } catch (error) {
       setNotice(error.message || 'The image could not be uploaded.')
+      throw error
+    } finally {
+      setMediaBusy('')
+    }
+  }
+
+  const uploadDemoVideo = async (productKey, video) => {
+    setMediaBusy('video')
+    setNotice('')
+    try {
+      const saved = await uploadProductDemoVideo(productKey, { video }, authOptions)
+      setProducts((current) => current.map((product) => product.key === saved.key ? saved : product))
+      setNotice('Product demo video uploaded and ready for the storefront.')
+      return saved
+    } catch (error) {
+      setNotice(error.message || 'The product demo could not be uploaded.')
+      throw error
+    } finally {
+      setMediaBusy('')
+    }
+  }
+
+  const removeDemoVideo = async (productKey) => {
+    setMediaBusy('video')
+    setNotice('')
+    try {
+      const saved = await deleteProductDemoVideo(productKey, authOptions)
+      setProducts((current) => current.map((product) => product.key === saved.key ? saved : product))
+      setNotice('Product demo video removed.')
+      return saved
+    } catch (error) {
+      setNotice(error.message || 'The product demo could not be removed.')
       throw error
     } finally {
       setMediaBusy('')
@@ -1166,6 +1276,7 @@ export default function AdminDashboard() {
           {[
             ['#products', 'Products'],
             ['#content', 'Content studio'],
+            ['#marketing', 'Email marketing'],
             ['#bundles', 'Bundles'],
             ['#offers', 'Offers'],
             ['#moderation', 'Reviews'],
@@ -1209,6 +1320,8 @@ export default function AdminDashboard() {
           deletingKey={deletingProductKey}
           savingKey={savingProductKey}
           onUploadMedia={uploadMedia}
+          onUploadVideo={uploadDemoVideo}
+          onDeleteVideo={removeDemoVideo}
           onPatchMedia={patchMedia}
           onCreateFeature={createFeature}
           onUpdateFeature={updateFeature}
@@ -1241,6 +1354,16 @@ export default function AdminDashboard() {
           onSaveAnnouncement={saveAnnouncement}
           savingKey={savingProductKey}
           notify={setNotice}
+        />
+        <AdminMarketingPanel
+          products={products}
+          overview={marketing}
+          authOptions={authOptions}
+          onCampaignQueued={(campaign) => {
+            setMarketing((current) => ({ ...current, campaigns: [campaign, ...(current.campaigns || [])] }))
+            setNotice(campaign.recipientCount ? `Campaign queued for ${campaign.recipientCount} consented contacts.` : 'Campaign saved with no eligible consented contacts.')
+          }}
+          onError={(message) => setNotice(message)}
         />
         <TestimonialTable items={testimonials} onModerate={moderate} pendingId={moderatingId} />
 

@@ -164,9 +164,13 @@ npx wrangler secret put BREVO_API_KEY --config worker/wrangler.toml
 npx wrangler secret put GOOGLE_SHEETS_COPY_URL --config worker/wrangler.toml
 npx wrangler secret put RATE_LIMIT_SALT --config worker/wrangler.toml
 npx wrangler secret put FEEDBACK_SIGNING_SECRET --config worker/wrangler.toml
+# Dedicated HMAC key for unsubscribe links (falls back to FEEDBACK_SIGNING_SECRET only during a staged rotation).
+npx wrangler secret put MARKETING_SIGNING_SECRET --config worker/wrangler.toml
+# Recommended: re-check webhook ownership with Supabase Admin API.
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --config worker/wrangler.toml
 ```
 
-Generate distinct random values for `RATE_LIMIT_SALT` and `FEEDBACK_SIGNING_SECRET`, with at least 32 random bytes each. Do not reuse a provider key.
+Generate distinct random values for `RATE_LIMIT_SALT`, `FEEDBACK_SIGNING_SECRET`, and `MARKETING_SIGNING_SECRET`, with at least 32 random bytes each. Do not reuse a provider key. `MARKETING_SIGNING_SECRET` signs one-click unsubscribe links; setting it independently supports safe feedback-key rotation.
 
 The Sheets secret must be the private Google Sheets `/copy` URL. It is returned only after a valid Supabase bearer token and verified purchase ownership check. It is never shown on the success page.
 
@@ -181,7 +185,7 @@ After deployment, set the public Worker URL as `VITE_API_BASE_URL`, rebuild the 
 
 ### Catalog and offer settings
 
-Every product is a row in the D1 `products` table, seeded on first run with the four suite products. The owner dashboard **Products** tab manages the catalog: name, tagline, category, icon, accent, Lemon Squeezy variant ID, private Google Sheets delivery link, display prices, offer label, includes list, visibility, featured status, sort order, and the uploaded hero and feature screenshots (unlimited, numbered on the storefront).
+Every product is a row in the D1 `products` table, seeded on first run with the four suite products. The owner dashboard **Products** tab manages the catalog: name, tagline, category, icon, accent, Lemon Squeezy variant ID, private Google Sheets delivery link, display prices, offer label, includes list, visibility, release availability (`live` or `coming_soon`), optional launch date, optional save-for-launch cart behavior, featured status, sort order, hero and feature screenshots (unlimited, numbered on the storefront), and an MP4/WebM demo video stored in R2. A public `coming_soon` product can collect product-specific Notify Me requests but cannot be checked out.
 
 The legacy settings panel remains the fallback for Cash Flow OS when its product-level fields are empty:
 

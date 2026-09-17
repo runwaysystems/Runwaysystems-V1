@@ -43,6 +43,7 @@ import {
   Zap,
 } from 'lucide-react'
 import ProductMockVisual from './ProductMockVisual'
+import { submitProductWaitlist } from '../api/platformApi'
 
 const cx = (...classes) => classes.filter(Boolean).join(' ')
 
@@ -348,6 +349,8 @@ export function HeroVisual({ visual, name }) {
 
 export function ProductHero({ product, offer, onToggleCart, inCart }) {
   const visual = product.hero.visual
+  const comingSoon = product.availability === 'coming_soon'
+  const canSaveForLaunch = !comingSoon || product.allowComingSoonCart
 
   return (
     <section className="hero dark-section">
@@ -363,24 +366,75 @@ export function ProductHero({ product, offer, onToggleCart, inCart }) {
           <h1>{product.hero.h1[0]}<br /><span>{product.hero.h1[1]}</span></h1>
           <p className="hero-lede">{product.hero.lede}</p>
           <div className="hero-actions">
-            <a href="#pricing" className="button button--lime button--large">Get {product.name} for {offer.displaySalePrice} <ArrowRight size={18} /></a>
-            {onToggleCart && (
+            {comingSoon
+              ? <a href="#notify" className="button button--lime button--large"><Mail size={17} /> Notify me when it&apos;s live <ArrowRight size={18} /></a>
+              : <a href="#pricing" className="button button--lime button--large">Get {product.name} for {offer.displaySalePrice} <ArrowRight size={18} /></a>}
+            {onToggleCart && canSaveForLaunch && (
               <button className={cx('button button--outline button--large', inCart && 'is-added')} type="button" onClick={onToggleCart} aria-pressed={inCart}>
-                {inCart ? <><Check size={15} /> In cart</> : <><ShoppingBag size={15} /> Add to cart</>}
+                {inCart ? <><Check size={15} /> {comingSoon ? 'Saved for launch' : 'In cart'}</> : <><ShoppingBag size={15} /> {comingSoon ? 'Save for launch' : 'Add to cart'}</>}
               </button>
             )}
             <a href="#preview" className="text-link">See what’s inside <ArrowRight size={15} /></a>
           </div>
           <div className="hero-trust">
-            <span><Check size={14} /> One-time payment</span>
-            <span><Check size={14} /> Instant access</span>
-            <span><Check size={14} /> Lifetime updates</span>
+            {comingSoon ? <><span><Check size={14} /> Full product preview</span><span><Check size={14} /> No payment today</span><span><Check size={14} /> Launch notice from info@runwaysystems.cloud</span></> : <><span><Check size={14} /> One-time payment</span><span><Check size={14} /> Instant access</span><span><Check size={14} /> Lifetime updates</span></>}
           </div>
         </div>
 
         <HeroVisual visual={visual} name={product.name} />
       </div>
       <div className="hero-bottom-fade" />
+    </section>
+  )
+}
+
+export function ProductWaitlist({ product }) {
+  const [email, setEmail] = useState('')
+  const [marketingConsent, setMarketingConsent] = useState(false)
+  const [status, setStatus] = useState('idle')
+  const [message, setMessage] = useState('')
+
+  if (product.availability !== 'coming_soon') return null
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setStatus('sending')
+    setMessage('')
+    try {
+      const result = await submitProductWaitlist(product.key, { email, notifyConsent: true, marketingConsent })
+      setStatus('sent')
+      setMessage(result?.message || `You are on the ${product.name} launch list.`)
+    } catch (error) {
+      setStatus('error')
+      setMessage(error.message || 'We could not save your launch notification. Please try again.')
+    }
+  }
+
+  return (
+    <section className="section section--cream product-waitlist" id="notify">
+      <div className="shell product-waitlist__layout">
+        <div className="product-waitlist__copy reveal">
+          <p className="eyebrow">EARLY ACCESS</p>
+          <h2>Be first on the runway.</h2>
+          <p>{product.name} is public to explore, but it is not available to purchase yet. Leave your email and we&apos;ll send one launch notice from <b>info@runwaysystems.cloud</b> with the direct product link.</p>
+          {product.launchAt && <p className="product-waitlist__date"><Check size={15} /> Planned launch: {new Date(product.launchAt).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })}</p>}
+        </div>
+        <form className="waitlist-form reveal" onSubmit={submit}>
+          <label>
+            <span>Email address</span>
+            <input type="email" required maxLength="254" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" disabled={status === 'sending' || status === 'sent'} />
+          </label>
+          <label className="waitlist-form__check">
+            <input type="checkbox" checked={marketingConsent} onChange={(event) => setMarketingConsent(event.target.checked)} disabled={status === 'sending' || status === 'sent'} />
+            <span>Also send me occasional Runway Systems product updates. Optional; you can unsubscribe anytime.</span>
+          </label>
+          <p className="waitlist-form__legal">By joining, you ask us to email this product&apos;s launch notice. Read our <Link to="/terms#terms">Terms</Link> and <Link to="/terms#privacy">Privacy Policy</Link>.</p>
+          <button className="button button--lime button--xl button--full" type="submit" disabled={status === 'sending' || status === 'sent'}>
+            {status === 'sending' ? 'Joining launch list…' : status === 'sent' ? <><Check size={17} /> You&apos;re on the list</> : <><Mail size={17} /> Notify me when it&apos;s live</>}
+          </button>
+          {message && <p className={cx('waitlist-form__message', status === 'error' && 'is-error')} role={status === 'error' ? 'alert' : 'status'}>{message}</p>}
+        </form>
+      </div>
     </section>
   )
 }
@@ -586,6 +640,28 @@ export function ProductTour({ product }) {
   )
 }
 
+export function ProductDemo({ product }) {
+  if (!product.demoVideo) return null
+  return (
+    <section className="section section--cream product-demo" id="demo">
+      <div className="shell product-demo__layout">
+        <div className="product-demo__copy reveal">
+          <p className="eyebrow">PRODUCT DEMO</p>
+          <h2>See the system in motion.</h2>
+          <p>Take a guided look inside {product.name} before you decide. Use the video controls to pause, scrub, or watch full screen.</p>
+          <span><Check size={15} /> A real product walkthrough, uploaded and managed by Runway Systems.</span>
+        </div>
+        <div className="product-demo__player reveal">
+          <video controls playsInline preload="metadata" poster={product.hero?.visual?.screen?.src || undefined} aria-label={`${product.name} product demonstration`}>
+            <source src={product.demoVideo} type={product.demoVideo.endsWith('.webm') ? 'video/webm' : 'video/mp4'} />
+            Your browser does not support this product demo video.
+          </video>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 export function FeatureGrid({ product }) {
   const moveSpotlight = (event) => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -701,6 +777,7 @@ export function AudienceProof({ product }) {
 
 export function ProductPricing({ product, onBuy, offer, onToggleCart, inCart }) {
   const cardRef = useRef(null)
+  const comingSoon = product.availability === 'coming_soon'
   const ProductIcon = sectionIcon(product.icon)
   const { pricing } = product
   const tiltCard = (event) => {
@@ -737,19 +814,19 @@ export function ProductPricing({ product, onBuy, offer, onToggleCart, inCart }) 
             <div><span className="product-icon"><ProductIcon /></span><p>{product.name}</p></div>
             <span className="one-time">ONE-TIME</span>
           </div>
-          <div className="price">{offer.offerActive && <s>{offer.displayOriginalPrice}</s>}<strong>{offer.displaySalePrice}</strong><span>USD<br />once</span></div>
-          <p className="price-sub">{pricing.priceSub}</p>
+          <div className="price">{comingSoon ? <><strong className="price--coming">Coming soon</strong><span>launch<br />access</span></> : <>{offer.offerActive && <s>{offer.displayOriginalPrice}</s>}<strong>{offer.displaySalePrice}</strong><span>USD<br />once</span></>}</div>
+          <p className="price-sub">{comingSoon ? `Explore everything included in ${product.name} now, then buy when it launches.` : pricing.priceSub}</p>
           <div className="included-list">{pricing.included.map((item) => <span key={item}><Check /> {item}</span>)}</div>
-          <button className="button button--lime button--xl button--full" onClick={onBuy} disabled={!product.checkoutReady}>
-            {product.checkoutReady ? <>Get instant access <ArrowRight /></> : 'Coming soon'}
-          </button>
-          {onToggleCart && (
+          {comingSoon
+            ? <a className="button button--lime button--xl button--full" href="#notify"><Mail size={17} /> Notify me when it&apos;s live <ArrowRight /></a>
+            : <button className="button button--lime button--xl button--full" onClick={onBuy} disabled={!product.checkoutReady}>{product.checkoutReady ? <>Get instant access <ArrowRight /></> : 'Checkout unavailable'}</button>}
+          {onToggleCart && (!comingSoon || product.allowComingSoonCart) && (
             <button className={cx('button button--outline button--full', inCart && 'is-added')} type="button" onClick={onToggleCart} aria-pressed={inCart}>
-              {inCart ? <><Check size={15} /> In cart</> : <><ShoppingBag size={15} /> Add to cart</>}
+              {inCart ? <><Check size={15} /> {comingSoon ? 'Saved for launch' : 'In cart'}</> : <><ShoppingBag size={15} /> {comingSoon ? 'Save for launch' : 'Add to cart'}</>}
             </button>
           )}
           <p className="secure-note">
-            <LockKeyhole /> Secure checkout powered by Lemon Squeezy · Tax handled as the merchant of record
+            {comingSoon ? <><Mail /> Launch notices are sent from info@runwaysystems.cloud · No payment today</> : <><LockKeyhole /> Secure checkout powered by Lemon Squeezy · Tax handled as the merchant of record</>}
           </p>
           <div className="price-footer"><span><b>{pricing.license}</b>{pricing.licenseBody}</span></div>
         </article>
@@ -784,10 +861,10 @@ export function FinalCTA({ product, onBuy, offer }) {
         <p className="eyebrow">{finalCta.eyebrow}</p>
         <h2>{finalCta.h2[0]}<br /><span>{finalCta.h2[1]}</span></h2>
         <p>{finalCta.copy}</p>
-        <button className="button button--lime button--xl" onClick={onBuy} disabled={!product.checkoutReady}>
-          {product.checkoutReady ? <>Get {product.name} for {offer.displaySalePrice} <ArrowRight /></> : 'Coming soon'}
-        </button>
-        <small>{finalCta.small.map((item) => <span key={item}><Check /> {item} </span>)}</small>
+        {product.availability === 'coming_soon'
+          ? <a className="button button--lime button--xl" href="#notify"><Mail size={17} /> Notify me when it&apos;s live <ArrowRight /></a>
+          : <button className="button button--lime button--xl" onClick={onBuy} disabled={!product.checkoutReady}>{product.checkoutReady ? <>Get {product.name} for {offer.displaySalePrice} <ArrowRight /></> : 'Checkout unavailable'}</button>}
+        <small>{product.availability === 'coming_soon' ? <><span><Check /> Full preview </span><span><Check /> No payment today </span><span><Check /> One launch email </span></> : finalCta.small.map((item) => <span key={item}><Check /> {item} </span>)}</small>
       </div>
     </section>
   )

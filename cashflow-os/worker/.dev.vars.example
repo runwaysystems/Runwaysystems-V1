@@ -1,0 +1,19 @@
+# Safe local-development template. Copy to worker/.dev.vars and replace every
+# value; this file is intentionally non-production and contains no credentials.
+APP_ORIGIN=http://localhost:5173
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_ANON_KEY=replace_with_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=replace_with_supabase_service_role_key
+OWNER_EMAIL=owner@example.com
+TRUSTPILOT_REVIEW_URL=https://www.trustpilot.com/review/your-domain.com
+EMAIL_FROM_DELIVERY=delivery@your-domain.com
+EMAIL_FROM_INFO=info@your-domain.com
+SUPPORT_EMAIL=support@your-domain.com
+LEMONSQUEEZY_API_KEY=replace_with_lemon_squeezy_api_key
+LEMONSQUEEZY_WEBHOOK_SECRET=replace_with_lemon_squeezy_webhook_secret
+LEMONSQUEEZY_STORE_ID=replace_with_lemon_squeezy_store_id
+BREVO_API_KEY=replace_with_brevo_api_key
+GOOGLE_SHEETS_COPY_URL=https://docs.google.com/spreadsheets/d/REPLACE_WITH_ID/copy
+RATE_LIMIT_SALT=replace_with_32_or_more_random_bytes
+FEEDBACK_SIGNING_SECRET=replace_with_32_or_more_random_bytes
+MARKETING_SIGNING_SECRET=replace_with_a_different_32_or_more_random_bytes

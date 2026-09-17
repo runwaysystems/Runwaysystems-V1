@@ -393,8 +393,9 @@ export function Navbar({ product = null, onBuy, theme, onToggleTheme, palette, o
     return () => trigger.kill()
   }, [])
 
+  const comingSoon = product?.availability === 'coming_soon'
   const links = product
-    ? [['Preview', '#preview'], ['Features', '#features'], ['How it works', '#how-it-works'], ['Reviews', '#reviews'], ['FAQ', '#faq']]
+    ? [...(comingSoon ? [['Notify me', '#notify']] : []), ['Preview', '#preview'], ...(product?.demoVideo ? [['Demo', '#demo']] : []), ['Features', '#features'], ['How it works', '#how-it-works'], ['Reviews', '#reviews'], ['FAQ', '#faq']]
     : [['Products', '#products'], ['Why Runway', '#why'], ['Reviews', '#reviews'], ['FAQ', '#faq']]
   const hrefFor = (hash) => (product || onHome ? hash : `/${hash}`)
 
@@ -422,10 +423,9 @@ export function Navbar({ product = null, onBuy, theme, onToggleTheme, palette, o
           </Link>
           <AccountButton />
           {product ? (
-            <>
-              <a className="nav-price" href="#pricing">{offer?.offerActive && <s>{offer.displayOriginalPrice}</s>} {offer?.displaySalePrice}</a>
-              <button className="button button--nav" onClick={onBuy}>{copy.buyLabel} <ArrowUpRight size={15} /></button>
-            </>
+            comingSoon
+              ? <><span className="nav-price nav-price--coming">Coming soon</span><a className="button button--nav" href="#notify"><Mail size={14} /> Notify me</a></>
+              : <><a className="nav-price" href="#pricing">{offer?.offerActive && <s>{offer.displayOriginalPrice}</s>} {offer?.displaySalePrice}</a><button className="button button--nav" onClick={onBuy}>{copy.buyLabel} <ArrowUpRight size={15} /></button></>
           ) : (
             <a className="button button--nav" href="#products">{copy.browseLabel} <ArrowUpRight size={15} /></a>
           )}
@@ -443,7 +443,9 @@ export function Navbar({ product = null, onBuy, theme, onToggleTheme, palette, o
         {product && <a href="#pricing" onClick={() => setOpen(false)}>Pricing</a>}
         <div className="mobile-account"><AccountButton /></div>
         {product
-          ? <button className="button button--dark button--full" onClick={() => { setOpen(false); onBuy() }}>Get {product.name} for {offer?.displaySalePrice}</button>
+          ? (comingSoon
+            ? <a className="button button--dark button--full" href="#notify" onClick={() => setOpen(false)}><Mail size={15} /> Notify me when it&apos;s live</a>
+            : <button className="button button--dark button--full" onClick={() => { setOpen(false); onBuy() }}>Get {product.name} for {offer?.displaySalePrice}</button>)
           : <a className="button button--dark button--full" href={hrefFor('#products')} onClick={() => setOpen(false)}>{copy.browseLabel}</a>}
       </div>
     </header>

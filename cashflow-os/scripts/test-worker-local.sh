@@ -42,18 +42,24 @@ npx --no-install wrangler d1 execute "$D1_NAME" --local --config "$WORKER_CONFIG
   DELETE FROM rate_limits; DELETE FROM purchases; DELETE FROM processed_webhooks;
   DELETE FROM review_requests; DELETE FROM revoked_orders; DELETE FROM daily_metrics;
   DELETE FROM client_errors; DELETE FROM admin_audit_log; DELETE FROM checkout_consents;
-  DELETE FROM feedback; DELETE FROM brevo_quota; DELETE FROM bundles; DELETE FROM testimonials;" >/dev/null
+  DELETE FROM feedback; DELETE FROM brevo_quota; DELETE FROM bundles; DELETE FROM testimonials;
+  DELETE FROM marketing_recipients; DELETE FROM marketing_campaigns; DELETE FROM waitlist_subscriptions; DELETE FROM contacts;" >/dev/null
 
 say "starting the mock Supabase fixture on :9876"
-node tests/mock-supabase.mjs >/dev/null 2>&1 &
+# Put each background service in its own process group. Wrangler launches
+# workerd children, so killing only the npm wrapper leaks :8787 into the next
+# run and makes the readiness check wait against stale code.
+setsid node tests/mock-supabase.mjs >/dev/null 2>&1 &
 MOCK_PID=$!
 
 say "starting wrangler dev on :8787"
-CI=true npx --no-install wrangler dev --local --config "$WORKER_CONFIG" --port 8787 --ip 127.0.0.1 >/dev/null 2>&1 &
+setsid env CI=true npx --no-install wrangler dev --local --config "$WORKER_CONFIG" --port 8787 --ip 127.0.0.1 >/dev/null 2>&1 &
 DEV_PID=$!
 
-cleanup() { kill "$MOCK_PID" "$DEV_PID" 2>/dev/null || true; }
-trap cleanup EXIT
+cleanup() {
+  kill -- "-$MOCK_PID" "-$DEV_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
 say "waiting for the Worker to report readiness"
 ready=0

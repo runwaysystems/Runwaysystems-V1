@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
 import { ArrowUpRight, Check, Mail, RefreshCw, ShieldCheck } from 'lucide-react'
-import { trackPageView, verifyCheckoutSession, getAccountPurchases } from './api/platformApi'
+import { trackPageView, verifyCheckoutSession, getAccountPurchases, unsubscribeFromMarketing } from './api/platformApi'
 import { isPreviewRequest } from './hooks/usePreviewDraft'
 import { AuthModal } from './components/AuthUI'
 import { Logo } from './components/Brand'
@@ -69,6 +69,51 @@ function LegalPage({ theme, onToggleTheme, palette, onPaletteChange }) {
       </main>
       <Footer products={(config?.products || []).map((product) => ({ key: product.key, name: product.name }))} supportEmail={supportEmail} />
       <CheckoutModal open={Boolean(checkoutError)} onClose={clearCheckoutError} message={checkoutError} supportEmail={supportEmail} />
+    </div>
+  )
+}
+
+function UnsubscribePage({ theme, onToggleTheme, palette, onPaletteChange }) {
+  const [searchParams] = useSearchParams()
+  const token = searchParams.get('token') || ''
+  const [status, setStatus] = useState('working')
+  const [message, setMessage] = useState('Updating your email preference…')
+
+  useEffect(() => {
+    if (!token) {
+      setStatus('error')
+      setMessage('This unsubscribe link is incomplete. Please use the link in your email or contact support.')
+      return undefined
+    }
+    let active = true
+    unsubscribeFromMarketing(token)
+      .then(() => {
+        if (!active) return
+        setStatus('done')
+        setMessage('You have been unsubscribed from Runway Systems marketing and launch emails.')
+      })
+      .catch((error) => {
+        if (!active) return
+        setStatus('error')
+        setMessage(error.message || 'We could not update your email preference. Please contact support.')
+      })
+    return () => { active = false }
+  }, [token])
+
+  return (
+    <div className="legal-page unsubscribe-page">
+      <Seo title="Email preferences | Runway Systems" description="Manage Runway Systems email preferences." canonicalPath="/unsubscribe" noindex />
+      <Navbar theme={theme} onToggleTheme={onToggleTheme} palette={palette} onPaletteChange={onPaletteChange} />
+      <main className="shell unsubscribe-main">
+        <section className={`unsubscribe-card is-${status}`} aria-live="polite">
+          <Mail />
+          <p className="eyebrow">EMAIL PREFERENCES</p>
+          <h1>{status === 'done' ? 'You’re all set.' : status === 'error' ? 'We need a hand.' : 'One moment.'}</h1>
+          <p>{message}</p>
+          <Link className="button primary" to="/">Return to Runway Systems</Link>
+        </section>
+      </main>
+      <Footer supportEmail={SUPPORT_EMAIL} />
     </div>
   )
 }
@@ -261,6 +306,7 @@ function App() {
         <Route path="/cart" element={<CartPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
         <Route path="/terms" element={<LegalPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
         <Route path="/success" element={<SuccessPage theme={theme} onToggleTheme={toggleTheme} />} />
+        <Route path="/unsubscribe" element={<UnsubscribePage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
         <Route path="/account" element={<AccountPage />} />
         <Route path="/feedback" element={<FeedbackPage />} />
         <Route path="/admin" element={<OwnerRoute><AdminDashboard /></OwnerRoute>} />

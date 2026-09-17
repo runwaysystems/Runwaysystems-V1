@@ -68,7 +68,7 @@ preflight() {
 
   # Secrets can only be verified on the deployed Worker; list what is expected.
   say "expected Worker secrets (Lemon Squeezy): LEMONSQUEEZY_API_KEY LEMONSQUEEZY_WEBHOOK_SECRET"
-  say "expected Worker secrets (shared): SUPABASE_ANON_KEY RESEND_API_KEY GOOGLE_SHEETS_COPY_URL RATE_LIMIT_SALT FEEDBACK_SIGNING_SECRET"
+  say "expected Worker secrets (shared): SUPABASE_ANON_KEY BREVO_API_KEY GOOGLE_SHEETS_COPY_URL RATE_LIMIT_SALT FEEDBACK_SIGNING_SECRET MARKETING_SIGNING_SECRET (plus recommended SUPABASE_SERVICE_ROLE_KEY)"
 
   ok "pre-flight passed"
 }

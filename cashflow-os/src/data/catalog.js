@@ -862,6 +862,10 @@ export function defaultProductConfig(key) {
     heroImage: '',
     featureImages: [],
     features: [],
+    demoVideo: '',
+    availability: 'live',
+    launchAt: '',
+    allowComingSoonCart: false,
     checkoutReady: true,
   }
 }
@@ -1219,7 +1223,11 @@ export function buildProductViewModel(key, live = null) {
         ...merged.pricing,
         included: liveDefaults.includes?.length ? liveDefaults.includes : merged.pricing.included,
       },
-      checkoutReady: typeof liveDefaults.checkoutReady === 'boolean' ? liveDefaults.checkoutReady : true,
+      availability: liveDefaults.availability === 'coming_soon' ? 'coming_soon' : 'live',
+      launchAt: liveDefaults.launchAt || '',
+      allowComingSoonCart: Boolean(liveDefaults.allowComingSoonCart),
+      demoVideo: liveDefaults.demoVideo || '',
+      checkoutReady: (liveDefaults.availability === 'coming_soon') ? false : (typeof liveDefaults.checkoutReady === 'boolean' ? liveDefaults.checkoutReady : true),
       taglineLive: liveDefaults.tagline || '',
     }, live)
   }
@@ -1229,6 +1237,10 @@ export function buildProductViewModel(key, live = null) {
       ...applyContentExtras(mergeContent(entry, liveDefaults?.content || {})),
       offer: { ...entry.defaultOffer },
       pricing: { ...entry.pricing },
+      availability: 'live',
+      launchAt: '',
+      allowComingSoonCart: false,
+      demoVideo: '',
       checkoutReady: true,
       taglineLive: '',
     }
@@ -1241,6 +1253,10 @@ export function buildProductViewModel(key, live = null) {
   return applyUploadedMedia({
     ...fallback,
     offer: { ...fallback.defaultOffer },
-    checkoutReady: typeof fallback.checkoutReady === 'boolean' ? fallback.checkoutReady : Boolean(live?.checkoutReady),
+    availability: live?.availability === 'coming_soon' ? 'coming_soon' : 'live',
+    launchAt: live?.launchAt || '',
+    allowComingSoonCart: Boolean(live?.allowComingSoonCart),
+    demoVideo: live?.demoVideo || '',
+    checkoutReady: live?.availability === 'coming_soon' ? false : (typeof fallback.checkoutReady === 'boolean' ? fallback.checkoutReady : Boolean(live?.checkoutReady)),
   }, live)
 }

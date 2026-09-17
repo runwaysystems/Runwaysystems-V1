@@ -13,6 +13,9 @@ const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' }
 const PRODUCT_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{1,40}$/
 const KNOWN_PRODUCT_ICONS = ['spreadsheet', 'users', 'gauge', 'receipt', 'folder', 'layers', 'calendar', 'kanban']
 const KNOWN_PRODUCT_ACCENTS = ['lime', 'blue', 'violet', 'peach', 'mint', 'yellow', 'lavender']
+const PRODUCT_AVAILABILITY = ['live', 'coming_soon']
+const WAITLIST_CONSENT_VERSION = '2026-09-17'
+const MARKETING_RECIPIENT_BATCH_SIZE = 20
 
 const PRODUCT_FALLBACK_NAMES = {
   'cashflow-os': 'Cash Flow OS',
@@ -467,6 +470,22 @@ function validHttpUrl(value, field) {
   }
 }
 
+function cleanEmail(value, field = 'Email') {
+  const email = cleanText(String(value || '').toLowerCase(), 254, field)
+  // Deliberately practical rather than RFC-complete: provider-level mailbox
+  // validation remains authoritative, while this rejects malformed input and
+  // header-injection characters before it reaches D1 or Brevo.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, `${field} must be a valid email address`)
+  return email
+}
+
+function cleanOptionalEmail(value, field = 'Email') {
+  const raw = cleanText(String(value || '').toLowerCase(), 254, field, { required: false })
+  if (!raw) return ''
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) throw new HttpError(400, `${field} must be a valid email address`)
+  return raw
+}
+
 function validSheetsCopyUrl(value) {
   try {
     const url = new URL(value)
@@ -574,6 +593,11 @@ function productRowToConfig(row) {
     lemonVariantId: row.lemon_variant_id || '',
     heroImage: row.hero_image || '',
     featureImages: parseStringList(row.feature_images),
+    demoVideo: row.demo_video || '',
+    availability: PRODUCT_AVAILABILITY.includes(row.availability) ? row.availability : 'live',
+    launchAt: row.launch_at || '',
+    allowComingSoonCart: Boolean(row.allow_coming_soon_cart),
+    launchNotifiedAt: row.launch_notified_at || '',
     content: parseContentJson(row.content),
     updatedAt: row.updated_at || '',
     active: Boolean(row.active),
@@ -643,6 +667,10 @@ function publicProductShape(product, features = []) {
     offerLabel: product.offerLabel,
     offerActive: product.offerActive,
     active: product.active,
+    availability: product.availability,
+    launchAt: product.launchAt || '',
+    allowComingSoonCart: Boolean(product.allowComingSoonCart),
+    demoVideo: product.demoVideo || '',
     featured: product.featured,
     sortOrder: product.sortOrder,
     includes: product.includes,
@@ -651,7 +679,7 @@ function publicProductShape(product, features = []) {
     features,
     content: product.content || {},
     updatedAt: product.updatedAt || '',
-    checkoutReady: Boolean(product.lemonVariantId && product.lemonVariantId !== ''),
+    checkoutReady: product.availability === 'live' && Boolean(product.lemonVariantId && product.lemonVariantId !== ''),
   }
 }
 
@@ -698,11 +726,19 @@ async function productNameForPurchase(env, purchaseId) {
   return name
 }
 
-const MEDIA_PATH_PATTERN = /^\/media\/[a-z0-9-]{1,60}\/[a-f0-9-]{8,64}\.webp$/
+const MEDIA_PATH_PATTERN = /^\/media\/[a-z0-9-]{1,60}\/[a-f0-9-]{8,64}\.(webp|mp4|webm)$/
+const IMAGE_MEDIA_PATH_PATTERN = /^\/media\/[a-z0-9-]{1,60}\/[a-f0-9-]{8,64}\.webp$/
+const VIDEO_MEDIA_PATH_PATTERN = /^\/media\/[a-z0-9-]{1,60}\/[a-f0-9-]{8,64}\.(mp4|webm)$/
 
 function cleanMediaPath(value, field) {
   const text = cleanText(value, 200, field, { required: false })
-  if (text && !MEDIA_PATH_PATTERN.test(text)) throw new HttpError(400, `${field} must be an uploaded media path`)
+  if (text && !IMAGE_MEDIA_PATH_PATTERN.test(text)) throw new HttpError(400, `${field} must be an uploaded media path`)
+  return text
+}
+
+function cleanVideoMediaPath(value, field) {
+  const text = cleanText(value, 200, field, { required: false })
+  if (text && !VIDEO_MEDIA_PATH_PATTERN.test(text)) throw new HttpError(400, `${field} must be an uploaded video path`)
   return text
 }
 
@@ -741,6 +777,9 @@ function cleanProductInput(input, { create = false } = {}) {
     offerLabel: cleanText(input.offerLabel, 80, 'Offer label'),
     offerActive: Boolean(input.offerActive),
     active: Boolean(input.active),
+    availability: PRODUCT_AVAILABILITY.includes(String(input.availability || 'live')) ? String(input.availability || 'live') : (() => { throw new HttpError(400, 'Invalid product availability') })(),
+    launchAt: cleanText(input.launchAt, 40, 'Launch date', { required: false }),
+    allowComingSoonCart: Boolean(input.allowComingSoonCart),
     featured: Boolean(input.featured),
     sortOrder: Math.min(999, Math.max(0, Number(input.sortOrder) || 0)),
     includes: cleanIncludes(input.includes),
@@ -749,6 +788,9 @@ function cleanProductInput(input, { create = false } = {}) {
   // save cannot wipe uploaded visuals.
   if (!create && Object.prototype.hasOwnProperty.call(input, 'heroImage')) {
     product.heroImage = cleanMediaPath(input.heroImage, 'Hero image')
+  }
+  if (!create && Object.prototype.hasOwnProperty.call(input, 'demoVideo')) {
+    product.demoVideo = cleanVideoMediaPath(input.demoVideo, 'Demo video')
   }
   if (!create && Object.prototype.hasOwnProperty.call(input, 'featureImages')) {
     const raw = Array.isArray(input.featureImages) ? input.featureImages : []
@@ -832,7 +874,25 @@ function featureRowToConfig(row) {
 function mediaObjectKey(mediaPath) {
   const match = MEDIA_PATH_PATTERN.exec(String(mediaPath || ''))
   if (!match) return ''
-  return `product-media/${match[1]}/${match[2]}.webp`
+  return `product-media/${match[1]}/${match[2]}.${match[3]}`
+}
+
+// Videos are checked by container signature rather than trusting the
+// client-declared MIME type. This is intentionally restricted to MP4/WebM,
+// formats supported by current browsers without a transcoding service.
+function decodeUploadedVideo(video) {
+  const parsed = /^data:video\/(mp4|webm);base64,([A-Za-z0-9+/=]+)$/.exec(String(video || ''))
+  if (!parsed) throw new HttpError(400, 'Video must be an MP4 or WebM data URL')
+  const binary = atob(parsed[2])
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+  if (bytes.byteLength < 512) throw new HttpError(400, 'Video is too small')
+  if (bytes.byteLength > 24 * 1024 * 1024) throw new HttpError(400, 'Video must be 24 MB or smaller')
+  const ascii = (start, length) => String.fromCharCode(...bytes.slice(start, start + length))
+  const valid = parsed[1] === 'mp4'
+    ? bytes.length >= 12 && ascii(4, 4) === 'ftyp'
+    : bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3
+  if (!valid) throw new HttpError(400, 'Video content does not match its declared format')
+  return { bytes, extension: parsed[1], contentType: `video/${parsed[1]}` }
 }
 
 // Uploads must be real images: the declared MIME type in a data URL is
@@ -938,8 +998,9 @@ async function createProduct(env, input) {
   await env.DB.prepare(`
     INSERT INTO products (
       key, name, tagline, category, icon, accent, lemon_variant_id, delivery_url,
-      original_price, sale_price, offer_label, offer_active, includes, active, featured, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      original_price, sale_price, offer_label, offer_active, includes, active, availability, launch_at,
+      allow_coming_soon_cart, demo_video, launch_notified_at, featured, sort_order, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
   `).bind(
     product.key,
     product.name,
@@ -955,6 +1016,10 @@ async function createProduct(env, input) {
     product.offerActive ? 1 : 0,
     JSON.stringify(product.includes),
     product.active ? 1 : 0,
+    product.availability,
+    product.launchAt,
+    product.allowComingSoonCart ? 1 : 0,
+    '',
     product.featured ? 1 : 0,
     product.sortOrder,
     updatedAt,
@@ -1007,13 +1072,14 @@ async function duplicateProduct(env, sourceKey, input) {
 }
 
 async function updateProduct(env, key, input) {
+  const before = await env.DB.prepare('SELECT availability FROM products WHERE key = ?').bind(key).first()
   const product = cleanProductInput(input)
   const updatedAt = nowIso()
   const result = await env.DB.prepare(`
     UPDATE products SET
       name = ?, tagline = ?, category = ?, icon = ?, accent = ?, lemon_variant_id = ?, delivery_url = ?,
       original_price = ?, sale_price = ?, offer_label = ?, offer_active = ?, includes = ?,
-      active = ?, featured = ?, sort_order = ?, updated_at = ?
+      active = ?, availability = ?, launch_at = ?, allow_coming_soon_cart = ?, featured = ?, sort_order = ?, updated_at = ?
     WHERE key = ?
     RETURNING *
   `).bind(
@@ -1030,6 +1096,9 @@ async function updateProduct(env, key, input) {
     product.offerActive ? 1 : 0,
     JSON.stringify(product.includes),
     product.active ? 1 : 0,
+    product.availability,
+    product.launchAt,
+    product.allowComingSoonCart ? 1 : 0,
     product.featured ? 1 : 0,
     product.sortOrder,
     updatedAt,
@@ -1040,6 +1109,9 @@ async function updateProduct(env, key, input) {
   const mediaStatements = []
   if (Object.prototype.hasOwnProperty.call(product, 'heroImage')) {
     mediaStatements.push(env.DB.prepare('UPDATE products SET hero_image = ?, updated_at = ? WHERE key = ?').bind(product.heroImage, updatedAt, key))
+  }
+  if (Object.prototype.hasOwnProperty.call(product, 'demoVideo')) {
+    mediaStatements.push(env.DB.prepare('UPDATE products SET demo_video = ?, updated_at = ? WHERE key = ?').bind(product.demoVideo, updatedAt, key))
   }
   if (Object.prototype.hasOwnProperty.call(product, 'featureImages')) {
     mediaStatements.push(env.DB.prepare('UPDATE products SET feature_images = ?, updated_at = ? WHERE key = ?').bind(JSON.stringify(product.featureImages), updatedAt, key))
@@ -1065,8 +1137,16 @@ async function updateProduct(env, key, input) {
   }
 
   const updated = await env.DB.prepare('SELECT * FROM products WHERE key = ?').bind(key).first()
+  let launchNotificationsQueued = 0
+  // Publishing is a state transition, not an email action on every Save.
+  // The queue function has an additional DB claim, making this safe against
+  // concurrent dashboard submissions and retried requests.
+  if ((before?.availability || 'live') !== 'live' && product.availability === 'live' && product.active) {
+    const launch = await queueLaunchNotifications(env, productRowToConfig(updated))
+    launchNotificationsQueued = launch.queued || 0
+  }
   await invalidatePublicCaches()
-  return productRowToConfig(updated)
+  return { ...productRowToConfig(updated), launchNotificationsQueued }
 }
 
 // ---------------------------------------------------------------- bundles
@@ -1266,6 +1346,7 @@ async function deleteProduct(env, key) {
   const featureRows = await env.DB.prepare('SELECT media_path FROM product_features WHERE product_key = ?').bind(key).all()
   const mediaPaths = [
     String(row.hero_image || ''),
+    String(row.demo_video || ''),
     ...parseStringList(row.feature_images),
     ...(featureRows.results || []).map((feature) => String(feature.media_path || '')),
   ].filter(Boolean)
@@ -1285,13 +1366,17 @@ async function deleteProduct(env, key) {
   return { removed: true, key, name: row.name || key }
 }
 
-const JSON_BODY_MAX_LENGTH = 8 * 1024 * 1024
+// Most JSON mutations are deliberately small. Demo-video uploads are the one
+// exception: their data URLs need enough headroom for a 24 MB MP4/WebM while
+// still keeping the Worker request and memory envelope bounded.
+const DEFAULT_JSON_BODY_MAX_LENGTH = 1 * 1024 * 1024
+const VIDEO_UPLOAD_JSON_BODY_MAX_LENGTH = 35 * 1024 * 1024
 
-async function readJson(request) {
+async function readJson(request, { maxLength = DEFAULT_JSON_BODY_MAX_LENGTH } = {}) {
   const contentType = request.headers.get('Content-Type') || ''
   if (!contentType.includes('application/json')) throw new HttpError(415, 'Content-Type must be application/json')
   const text = await request.text()
-  if (text.length > JSON_BODY_MAX_LENGTH) throw new HttpError(413, 'Request body is too large')
+  if (text.length > maxLength) throw new HttpError(413, 'Request body is too large')
   try {
     return JSON.parse(text)
   } catch {
@@ -1739,7 +1824,7 @@ async function createCheckoutSession(request, env, user) {
     if (seenKeys.has(productKey)) continue
     seenKeys.add(productKey)
     const product = await resolveProductConfig(env, productKey)
-    if (!product.active) throw new HttpError(404, `${product.name} is not available`)
+    if (!product.active || product.availability !== 'live') throw new HttpError(404, `${product.name} is not available to purchase yet`)
     const variantId = String(product.lemonVariantId || '').trim()
     if (!variantId) throw new HttpError(503, `No Lemon Squeezy variant is configured for ${product.name}`)
     items.push({ product, lemonVariantId: variantId })
@@ -1965,7 +2050,7 @@ async function sendBrevo(env, message) {
 
 function emailLayout(title, intro, actionLabel, actionUrl, footer, secondaryAction = null, eyebrow = 'RUNWAY SYSTEMS') {
   const safeTitle = escapeHtml(title)
-  const safeIntro = escapeHtml(intro)
+  const safeIntro = escapeHtml(intro).replaceAll('\n', '<br />')
   const safeLabel = escapeHtml(actionLabel)
   const safeUrl = escapeHtml(actionUrl)
   const safeFooter = escapeHtml(footer)
@@ -1984,6 +2069,436 @@ function emailLayout(title, intro, actionLabel, actionUrl, footer, secondaryActi
 ${secondary}
 <tr><td style="color:#737b89;font-size:12px;line-height:1.6;padding-top:30px">${safeFooter}</td></tr>
 </table></td></tr></table></body></html>`
+}
+
+// ---------------------------------------------------------------------------
+// Contacts, waitlists, and marketing campaigns
+//
+// A contact record documents an account, purchase, or waitlist relationship.
+// It is intentionally not equivalent to permission for promotional email.
+// `marketing_consent` is changed only by an affirmative waitlist/account
+// preference action and is checked again immediately before each send.
+
+async function upsertContact(env, { email, userId = '', name = '', source = 'unknown', marketingConsent = false } = {}) {
+  const normalizedEmail = cleanEmail(email)
+  const now = nowIso()
+  const id = makeId('contact')
+  await env.DB.prepare(`
+    INSERT INTO contacts (
+      id, email, user_id, name, first_source, last_source, marketing_consent,
+      marketing_consented_at, unsubscribed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+    ON CONFLICT(email) DO UPDATE SET
+      user_id = CASE WHEN excluded.user_id != '' THEN excluded.user_id ELSE contacts.user_id END,
+      name = CASE WHEN excluded.name != '' THEN excluded.name ELSE contacts.name END,
+      last_source = excluded.last_source,
+      marketing_consent = CASE WHEN excluded.marketing_consent = 1 THEN 1 ELSE contacts.marketing_consent END,
+      marketing_consented_at = CASE
+        WHEN excluded.marketing_consent = 1 AND contacts.marketing_consented_at = '' THEN excluded.marketing_consented_at
+        ELSE contacts.marketing_consented_at END,
+      unsubscribed_at = CASE WHEN excluded.marketing_consent = 1 THEN '' ELSE contacts.unsubscribed_at END,
+      updated_at = excluded.updated_at
+  `).bind(
+    id,
+    normalizedEmail,
+    cleanText(userId, 120, 'User id', { required: false }),
+    cleanText(name, 120, 'Name', { required: false }),
+    cleanText(source, 40, 'Contact source', { required: false }) || 'unknown',
+    cleanText(source, 40, 'Contact source', { required: false }) || 'unknown',
+    marketingConsent ? 1 : 0,
+    marketingConsent ? now : '',
+    now,
+    now,
+  ).run()
+  return env.DB.prepare('SELECT * FROM contacts WHERE email = ?').bind(normalizedEmail).first()
+}
+
+function contactDisplay(contact) {
+  return {
+    id: contact.id,
+    email: contact.email,
+    name: contact.name || '',
+    firstSource: contact.first_source || 'unknown',
+    lastSource: contact.last_source || 'unknown',
+    marketingConsent: Boolean(contact.marketing_consent) && !contact.unsubscribed_at,
+    consentedAt: contact.marketing_consented_at || '',
+    unsubscribedAt: contact.unsubscribed_at || '',
+    createdAt: contact.created_at || '',
+    updatedAt: contact.updated_at || '',
+  }
+}
+
+async function upsertSelfContact(env, user) {
+  return upsertContact(env, {
+    email: user.email,
+    userId: user.id,
+    name: user.user_metadata?.full_name || user.user_metadata?.name || '',
+    source: 'sign_in',
+  })
+}
+
+async function getAccountEmailPreferences(env, user) {
+  const contact = await upsertSelfContact(env, user)
+  return {
+    email: contact.email,
+    marketingConsent: Boolean(contact.marketing_consent) && !contact.unsubscribed_at,
+    consentedAt: contact.marketing_consented_at || '',
+    unsubscribedAt: contact.unsubscribed_at || '',
+  }
+}
+
+async function saveAccountEmailPreferences(env, user, input) {
+  const enabled = input?.marketingConsent === true
+  const contact = await upsertSelfContact(env, user)
+  const now = nowIso()
+  await env.DB.prepare(`
+    UPDATE contacts SET
+      marketing_consent = ?,
+      marketing_consented_at = CASE WHEN ? = 1 THEN CASE WHEN marketing_consented_at = '' THEN ? ELSE marketing_consented_at END ELSE marketing_consented_at END,
+      unsubscribed_at = CASE WHEN ? = 1 THEN '' ELSE ? END,
+      updated_at = ?
+    WHERE id = ?
+  `).bind(enabled ? 1 : 0, enabled ? 1 : 0, now, enabled ? 1 : 0, now, now, contact.id).run()
+  return getAccountEmailPreferences(env, user)
+}
+
+async function subscribeToProductWaitlist(request, env, productKey, input) {
+  await rateLimit(request, env, 'waitlist-ip', 12, 3600)
+  const product = await resolveProductConfig(env, productKey)
+  if (!product.active || product.availability !== 'coming_soon') throw new HttpError(404, 'This product is not accepting launch notifications')
+  if (input?.notifyConsent !== true) throw new HttpError(400, 'Please confirm that we may use this email for the product launch notice')
+  const email = cleanEmail(input?.email)
+  await rateLimit(request, env, 'waitlist-email', 4, 86400, email)
+  const contact = await upsertContact(env, {
+    email,
+    source: 'waitlist',
+    marketingConsent: input?.marketingConsent === true,
+  })
+  const now = nowIso()
+  await env.DB.prepare(`
+    INSERT INTO waitlist_subscriptions (
+      id, product_key, contact_id, status, requested_at, notified_at,
+      unsubscribed_at, consent_version, created_at, updated_at
+    ) VALUES (?, ?, ?, 'subscribed', ?, '', '', ?, ?, ?)
+    ON CONFLICT(product_key, contact_id) DO UPDATE SET
+      status = 'subscribed', notified_at = '', unsubscribed_at = '',
+      consent_version = excluded.consent_version, updated_at = excluded.updated_at
+  `).bind(makeId('waitlist'), product.key, contact.id, now, WAITLIST_CONSENT_VERSION, now, now).run()
+  // Avoid revealing whether an address was already subscribed.
+  return { accepted: true, message: `You are on the ${product.name} launch list.` }
+}
+
+function b64url(bytes) {
+  let value = ''
+  for (const byte of bytes) value += String.fromCharCode(byte)
+  return btoa(value).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
+}
+
+async function marketingToken(env, contactId) {
+  const secret = env.MARKETING_SIGNING_SECRET || env.FEEDBACK_SIGNING_SECRET
+  if (!secret) throw new HttpError(503, 'Marketing link signing is not configured')
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(contactId)))
+  return `${contactId}.${b64url(signature)}`
+}
+
+async function contactFromMarketingToken(env, token) {
+  const [contactId, supplied] = String(token || '').split('.')
+  if (!/^contact_[a-f0-9-]{36}$/.test(contactId) || !supplied) throw new HttpError(400, 'This unsubscribe link is invalid')
+  const expected = await marketingToken(env, contactId)
+  const [, signature] = expected.split('.')
+  if (!constantTimeEqual(signature, supplied)) throw new HttpError(400, 'This unsubscribe link is invalid')
+  const contact = await env.DB.prepare('SELECT * FROM contacts WHERE id = ?').bind(contactId).first()
+  if (!contact) throw new HttpError(404, 'This unsubscribe link has expired')
+  return contact
+}
+
+async function unsubscribeContact(env, token) {
+  const contact = await contactFromMarketingToken(env, token)
+  const now = nowIso()
+  await env.DB.batch([
+    env.DB.prepare('UPDATE contacts SET marketing_consent = 0, unsubscribed_at = ?, updated_at = ? WHERE id = ?').bind(now, now, contact.id),
+    env.DB.prepare(`UPDATE waitlist_subscriptions SET status = 'unsubscribed', unsubscribed_at = ?, updated_at = ? WHERE contact_id = ? AND status = 'subscribed'`).bind(now, now, contact.id),
+    env.DB.prepare(`UPDATE marketing_recipients SET status = 'skipped', updated_at = ? WHERE contact_id = ? AND status IN ('pending', 'failed')`).bind(now, contact.id),
+  ])
+  return { unsubscribed: true }
+}
+
+function cleanCampaignInput(input) {
+  const audience = String(input?.audience || 'subscribers')
+  if (!['subscribers', 'customers', 'waitlist'].includes(audience)) throw new HttpError(400, 'Invalid marketing audience')
+  const ctaLabel = cleanText(input?.ctaLabel, 80, 'Call-to-action label', { required: false })
+  const ctaUrl = cleanText(input?.ctaUrl, 500, 'Call-to-action URL', { required: false })
+  if ((ctaLabel && !ctaUrl) || (!ctaLabel && ctaUrl)) throw new HttpError(400, 'Provide both a call-to-action label and URL')
+  return {
+    audience,
+    productKey: cleanText(input?.productKey, 60, 'Product key', { required: false }),
+    subject: cleanText(input?.subject, 150, 'Campaign subject'),
+    preheader: cleanText(input?.preheader, 180, 'Campaign preheader', { required: false }),
+    body: cleanText(input?.body, 4000, 'Campaign body'),
+    ctaLabel,
+    ctaUrl: ctaUrl ? validHttpUrl(ctaUrl, 'Call-to-action URL') : '',
+  }
+}
+
+async function audienceContacts(env, audience, productKey = '') {
+  const base = `c.marketing_consent = 1 AND c.unsubscribed_at = ''`
+  if (audience === 'customers') {
+    const result = await env.DB.prepare(`
+      SELECT c.* FROM contacts c WHERE ${base}
+      AND EXISTS (SELECT 1 FROM purchases p WHERE lower(p.customer_email) = c.email AND p.payment_status = 'paid')
+      ORDER BY c.created_at ASC
+    `).all()
+    return result.results || []
+  }
+  if (audience === 'waitlist') {
+    const suffix = productKey ? 'AND w.product_key = ?' : ''
+    const stmt = env.DB.prepare(`
+      SELECT DISTINCT c.* FROM contacts c
+      JOIN waitlist_subscriptions w ON w.contact_id = c.id
+      WHERE ${base} AND w.status = 'subscribed' ${suffix}
+      ORDER BY c.created_at ASC
+    `)
+    const result = productKey ? await stmt.bind(productKey).all() : await stmt.all()
+    return result.results || []
+  }
+  const result = await env.DB.prepare(`SELECT c.* FROM contacts c WHERE ${base} ORDER BY c.created_at ASC`).all()
+  return result.results || []
+}
+
+async function insertCampaignRecipients(env, campaignId, contacts) {
+  const now = nowIso()
+  for (let offset = 0; offset < contacts.length; offset += 80) {
+    const group = contacts.slice(offset, offset + 80)
+    await env.DB.batch(group.map((contact) => env.DB.prepare(`
+      INSERT OR IGNORE INTO marketing_recipients (id, campaign_id, contact_id, email, status, attempts, next_eligible_at, sent_at, last_error, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'pending', 0, '', '', '', ?, ?)
+    `).bind(makeId('mrecipient'), campaignId, contact.id, contact.email, now, now)))
+  }
+}
+
+async function createMarketingCampaign(env, owner, input) {
+  const campaign = cleanCampaignInput(input)
+  if (campaign.productKey && !(await isKnownProductKey(env, campaign.productKey))) throw new HttpError(404, 'Campaign product was not found')
+  const contacts = await audienceContacts(env, campaign.audience, campaign.productKey)
+  const id = makeId('campaign')
+  const now = nowIso()
+  await env.DB.prepare(`
+    INSERT INTO marketing_campaigns (
+      id, kind, product_key, audience, subject, preheader, body, cta_label, cta_url,
+      status, recipient_count, created_by, created_at
+    ) VALUES (?, 'marketing', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(id, campaign.productKey, campaign.audience, campaign.subject, campaign.preheader, campaign.body, campaign.ctaLabel, campaign.ctaUrl, contacts.length ? 'queued' : 'completed', contacts.length, owner.id, now).run()
+  await insertCampaignRecipients(env, id, contacts)
+  return campaignSummary(await env.DB.prepare('SELECT * FROM marketing_campaigns WHERE id = ?').bind(id).first())
+}
+
+async function queueLaunchNotifications(env, product) {
+  // Claim the release once. The campaign itself is also uniquely keyed to the
+  // product (migration 0011), so a retry can safely resume recipient creation
+  // after a transient D1/R2/provider failure without generating a second send.
+  const claimedAt = nowIso()
+  const claimed = await env.DB.prepare(`
+    UPDATE products SET launch_notified_at = ?
+    WHERE key = ? AND availability = 'live' AND (launch_notified_at = '' OR launch_notified_at IS NULL)
+    RETURNING *
+  `).bind(claimedAt, product.key).first()
+  if (!claimed) return { queued: 0 }
+
+  try {
+    const result = await env.DB.prepare(`
+      SELECT c.* FROM contacts c JOIN waitlist_subscriptions w ON w.contact_id = c.id
+      WHERE w.product_key = ? AND w.status = 'subscribed' AND w.unsubscribed_at = ''
+      ORDER BY w.requested_at ASC
+    `).bind(product.key).all()
+    const contacts = result.results || []
+    // A launch with no subscribers is still claimed above, but does not add a
+    // misleading empty campaign to the owner’s marketing history.
+    if (!contacts.length) return { queued: 0 }
+    const candidateId = makeId('campaign')
+    const origin = getPrimaryOrigin(env)
+    const current = productRowToConfig(claimed)
+    const now = nowIso()
+    await env.DB.prepare(`
+      INSERT OR IGNORE INTO marketing_campaigns (
+        id, kind, product_key, audience, subject, preheader, body, cta_label, cta_url,
+        status, recipient_count, created_by, created_at
+      ) VALUES (?, 'launch', ?, 'waitlist', ?, ?, ?, ?, ?, ?, ?, 'system', ?)
+    `).bind(
+      candidateId,
+      current.key,
+      `${current.name} is now live`,
+      'The product you asked about is ready.',
+      `${current.name} is now public and ready to explore. Open the product page to see what is included and purchase when you are ready.`,
+      `View ${current.name}`,
+      `${origin}/products/${encodeURIComponent(current.key)}`,
+      contacts.length ? 'queued' : 'completed',
+      contacts.length,
+      now,
+    ).run()
+    const campaign = await env.DB.prepare(`SELECT * FROM marketing_campaigns WHERE kind = 'launch' AND product_key = ?`).bind(current.key).first()
+    if (!campaign) throw new Error('Launch campaign could not be created')
+    await insertCampaignRecipients(env, campaign.id, contacts)
+    await refreshCampaignStatus(env, campaign.id)
+    return { queued: contacts.length, campaignId: campaign.id }
+  } catch (error) {
+    // Do not permanently consume the one-time product claim if the durable
+    // campaign/recipient queue could not be written. The scheduled recovery
+    // below picks it up even if the owner never presses Save again.
+    await env.DB.prepare(`
+      UPDATE products SET launch_notified_at = ''
+      WHERE key = ? AND launch_notified_at = ?
+    `).bind(product.key, claimedAt).run().catch(() => {})
+    throw error
+  }
+}
+
+async function recoverPendingLaunchNotifications(env) {
+  const result = await env.DB.prepare(`
+    SELECT * FROM products p
+    WHERE p.active = 1 AND p.availability = 'live' AND (p.launch_notified_at = '' OR p.launch_notified_at IS NULL)
+      AND EXISTS (
+        SELECT 1 FROM waitlist_subscriptions w
+        WHERE w.product_key = p.key AND w.status = 'subscribed' AND w.unsubscribed_at = ''
+      )
+    ORDER BY p.updated_at ASC LIMIT 20
+  `).all()
+  for (const row of result.results || []) {
+    try {
+      await queueLaunchNotifications(env, productRowToConfig(row))
+    } catch (error) {
+      logEvent('warn', 'launch_notification_queue_failed', { productKey: row.key, error: redactPii(error?.message || 'Unknown error') })
+    }
+  }
+}
+
+function campaignSummary(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    kind: row.kind,
+    productKey: row.product_key || '',
+    audience: row.audience,
+    subject: row.subject,
+    preheader: row.preheader || '',
+    body: row.body || '',
+    ctaLabel: row.cta_label || '',
+    ctaUrl: row.cta_url || '',
+    status: row.status,
+    recipientCount: Number(row.recipient_count || 0),
+    sentCount: Number(row.sent_count || 0),
+    failedCount: Number(row.failed_count || 0),
+    skippedCount: Number(row.skipped_count || 0),
+    createdAt: row.created_at,
+    startedAt: row.started_at || '',
+    completedAt: row.completed_at || '',
+  }
+}
+
+async function refreshCampaignStatus(env, campaignId) {
+  const totals = await env.DB.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped,
+      SUM(CASE WHEN status IN ('pending', 'sending') THEN 1 ELSE 0 END) AS pending
+    FROM marketing_recipients WHERE campaign_id = ?
+  `).bind(campaignId).first()
+  const done = Number(totals?.pending || 0) === 0
+  await env.DB.prepare(`
+    UPDATE marketing_campaigns SET recipient_count = ?, sent_count = ?, failed_count = ?, skipped_count = ?,
+      status = CASE WHEN ? THEN 'completed' WHEN status = 'queued' THEN 'sending' ELSE status END,
+      started_at = CASE WHEN started_at = '' THEN ? ELSE started_at END,
+      completed_at = CASE WHEN ? THEN ? ELSE completed_at END
+    WHERE id = ?
+  `).bind(Number(totals?.total || 0), Number(totals?.sent || 0), Number(totals?.failed || 0), Number(totals?.skipped || 0), done ? 1 : 0, nowIso(), done ? 1 : 0, done ? nowIso() : '', campaignId).run()
+}
+
+async function getMarketingOverview(env) {
+  const [all, subscribed, customers, waitlist, campaigns, contacts] = await Promise.all([
+    env.DB.prepare('SELECT COUNT(*) AS total FROM contacts').first(),
+    env.DB.prepare("SELECT COUNT(*) AS total FROM contacts WHERE marketing_consent = 1 AND unsubscribed_at = ''").first(),
+    env.DB.prepare("SELECT COUNT(DISTINCT c.id) AS total FROM contacts c WHERE EXISTS (SELECT 1 FROM purchases p WHERE lower(p.customer_email) = c.email AND p.payment_status = 'paid')").first(),
+    env.DB.prepare("SELECT COUNT(DISTINCT contact_id) AS total FROM waitlist_subscriptions WHERE status = 'subscribed'").first(),
+    env.DB.prepare('SELECT * FROM marketing_campaigns ORDER BY created_at DESC LIMIT 10').all(),
+    env.DB.prepare('SELECT * FROM contacts ORDER BY updated_at DESC LIMIT 12').all(),
+  ])
+  return {
+    counts: {
+      contacts: Number(all?.total || 0),
+      subscribers: Number(subscribed?.total || 0),
+      customers: Number(customers?.total || 0),
+      waitlist: Number(waitlist?.total || 0),
+    },
+    campaigns: (campaigns.results || []).map(campaignSummary),
+    contacts: (contacts.results || []).map(contactDisplay),
+  }
+}
+
+async function sendMarketingRecipient(env, recipient, campaign) {
+  const contact = await env.DB.prepare('SELECT * FROM contacts WHERE id = ?').bind(recipient.contact_id).first()
+  if (!contact) return { skipped: true, reason: 'Contact no longer exists' }
+  if (campaign.kind === 'marketing' && (!contact.marketing_consent || contact.unsubscribed_at)) return { skipped: true, reason: 'Marketing consent withdrawn' }
+  if (campaign.kind === 'launch') {
+    const subscription = await env.DB.prepare(`SELECT * FROM waitlist_subscriptions WHERE contact_id = ? AND product_key = ?`).bind(contact.id, campaign.product_key).first()
+    const product = await env.DB.prepare('SELECT active, availability FROM products WHERE key = ?').bind(campaign.product_key).first()
+    if (!subscription || subscription.status !== 'subscribed' || subscription.unsubscribed_at || !product?.active || product.availability !== 'live') return { skipped: true, reason: 'Launch notification is no longer eligible' }
+  }
+  const origin = getPrimaryOrigin(env)
+  const unsubscribeUrl = `${origin}/unsubscribe?token=${encodeURIComponent(await marketingToken(env, contact.id))}`
+  const footer = `You are receiving this because you requested product updates or opted in to Runway Systems marketing. Unsubscribe: ${unsubscribeUrl}\nNeed help? ${env.SUPPORT_EMAIL || 'info@runwaysystems.cloud'}`
+  const intro = campaign.preheader || campaign.body
+  const ctaUrl = campaign.cta_url || origin
+  const ctaLabel = campaign.cta_label || 'Visit Runway Systems'
+  await sendBrevo(env, {
+    to: recipient.email,
+    from: env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud',
+    subject: campaign.subject,
+    idempotencyKey: `runway-campaign-${recipient.id}`,
+    html: emailLayout(campaign.subject, `${intro}\n\n${campaign.body}`, ctaLabel, ctaUrl, footer, null, campaign.kind === 'launch' ? 'RUNWAY SYSTEMS / PRODUCT LAUNCH' : 'RUNWAY SYSTEMS / UPDATES'),
+    text: `${campaign.subject}\n\n${intro}\n\n${campaign.body}\n\n${ctaLabel}: ${ctaUrl}\n\n${footer}`,
+  })
+  return { skipped: false }
+}
+
+async function processMarketingQueue(env) {
+  const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+  const now = nowIso()
+  const due = await env.DB.prepare(`
+    SELECT r.*, c.kind, c.product_key, c.subject, c.preheader, c.body, c.cta_label, c.cta_url
+    FROM marketing_recipients r JOIN marketing_campaigns c ON c.id = r.campaign_id
+    WHERE (r.status IN ('pending', 'failed') OR (r.status = 'sending' AND r.updated_at <= ?))
+      AND r.attempts < 5 AND (r.next_eligible_at = '' OR r.next_eligible_at <= ?)
+    ORDER BY r.created_at ASC LIMIT ?
+  `).bind(staleBefore, now, MARKETING_RECIPIENT_BATCH_SIZE).all()
+  const touched = new Set()
+  for (const candidate of due.results || []) {
+    const claimed = await env.DB.prepare(`
+      UPDATE marketing_recipients SET status = 'sending', attempts = attempts + 1, last_error = '', updated_at = ?
+      WHERE id = ? AND attempts < 5
+        AND (status IN ('pending', 'failed') OR (status = 'sending' AND updated_at <= ?))
+        AND (next_eligible_at = '' OR next_eligible_at <= ?)
+      RETURNING *
+    `).bind(nowIso(), candidate.id, staleBefore, nowIso()).first()
+    if (!claimed) continue
+    try {
+      const result = await sendMarketingRecipient(env, claimed, candidate)
+      const completedAt = nowIso()
+      if (result.skipped) {
+        await env.DB.prepare(`UPDATE marketing_recipients SET status = 'skipped', last_error = ?, updated_at = ? WHERE id = ?`).bind(result.reason, completedAt, claimed.id).run()
+      } else {
+        await env.DB.prepare(`UPDATE marketing_recipients SET status = 'sent', sent_at = ?, next_eligible_at = '', updated_at = ? WHERE id = ?`).bind(completedAt, completedAt, claimed.id).run()
+        if (candidate.kind === 'launch') await env.DB.prepare(`UPDATE waitlist_subscriptions SET status = 'notified', notified_at = ?, updated_at = ? WHERE contact_id = ? AND product_key = ?`).bind(completedAt, completedAt, claimed.contact_id, candidate.product_key).run()
+      }
+    } catch (error) {
+      const cooldown = Math.max(60, Number(error?.retryAfterSeconds) || 0)
+      const retryAt = new Date(Date.now() + cooldown * 1000).toISOString()
+      await env.DB.prepare(`UPDATE marketing_recipients SET status = 'failed', last_error = ?, next_eligible_at = ?, updated_at = ? WHERE id = ?`).bind(redactPii(error?.message || 'Email provider error').slice(0, 500), retryAt, retryAt, claimed.id).run()
+    }
+    touched.add(candidate.campaign_id)
+  }
+  for (const campaignId of touched) await refreshCampaignStatus(env, campaignId)
 }
 
 async function sendDeliveryEmail(env, purchase, product) {
@@ -2171,6 +2686,11 @@ async function processEmailQueues(env) {
     }
   }
 
+  // Campaign and launch notifications use the same Brevo cooldown and queue
+  // discipline as delivery/review email, but remain isolated in their own
+  // table so a launch cannot delay a buyer's private product access.
+  await processMarketingQueue(env)
+
   await env.DB.prepare('DELETE FROM rate_limits WHERE expires_at < ?').bind(nowIso()).run()
 }
 
@@ -2231,6 +2751,11 @@ async function recordLemonOrder(env, data, eventKey, eventName, event = null) {
 
   const firstItem = attributes.first_order_item || {}
   const variantId = String(firstItem.variant_id || '')
+
+  // Keep a delivery/account contact record when Lemon Squeezy confirms a
+  // purchase. This is operational data only; it does not create a marketing
+  // subscription without the person's separate affirmative choice.
+  await upsertContact(env, { email, userId, name: String(attributes.user_name || ''), source: 'purchase' })
 
   const statements = []
   for (let index = 0; index < items.length; index += 1) {
@@ -2416,6 +2941,18 @@ async function deleteAccountData(env, user) {
         updated_at = ?
     WHERE user_id = ?
   `).bind(updatedAt, user.id).run()
+
+  // Contact records and queued campaigns: remove identifiers and suppress
+  // all future marketing/launch sends. Recipient snapshots are cleared before
+  // the contact is pseudonymised so a queued campaign cannot retain an email.
+  const contacts = await env.DB.prepare('SELECT id FROM contacts WHERE user_id = ?').bind(user.id).all()
+  for (const contact of contacts.results || []) {
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE waitlist_subscriptions SET status = 'unsubscribed', unsubscribed_at = ?, updated_at = ? WHERE contact_id = ? AND status = 'subscribed'`).bind(updatedAt, updatedAt, contact.id),
+      env.DB.prepare(`UPDATE marketing_recipients SET status = 'skipped', email = '', last_error = 'Account deleted', updated_at = ? WHERE contact_id = ? AND status IN ('pending', 'failed', 'sending')`).bind(updatedAt, contact.id),
+      env.DB.prepare(`UPDATE contacts SET email = 'deleted:' || id, user_id = 'deleted:' || id, name = '', marketing_consent = 0, unsubscribed_at = ?, updated_at = ? WHERE id = ?`).bind(updatedAt, updatedAt, contact.id),
+    ])
+  }
 
   // Review requests hold delivery email addresses: delete outright.
   await env.DB.prepare('DELETE FROM review_requests WHERE user_id = ?').bind(user.id).run()
@@ -2665,6 +3202,29 @@ async function handleRequest(request, env, ctx) {
     return json(request, env, JSON.parse(bodyText), 200, { 'Cache-Control': 'public, max-age=60' })
   }
 
+  let match = routeMatch(path, /^\/products\/([a-z0-9-]{1,60})\/waitlist$/)
+  if (match && request.method === 'POST') {
+    const productKey = decodeURIComponent(match[1])
+    return json(request, env, await subscribeToProductWaitlist(request, env, productKey, await readJson(request)), 202, { 'Cache-Control': 'no-store' })
+  }
+  if (path === '/contacts/self' && request.method === 'POST') {
+    const user = await authenticate(request, env)
+    const contact = await upsertSelfContact(env, user)
+    return json(request, env, { contact: contactDisplay(contact) }, 200, { 'Cache-Control': 'no-store' })
+  }
+  if (path === '/account/email-preferences' && request.method === 'GET') {
+    const user = await authenticate(request, env)
+    return json(request, env, await getAccountEmailPreferences(env, user), 200, { 'Cache-Control': 'no-store' })
+  }
+  if (path === '/account/email-preferences' && request.method === 'PUT') {
+    const user = await authenticate(request, env)
+    return json(request, env, await saveAccountEmailPreferences(env, user, await readJson(request)), 200, { 'Cache-Control': 'no-store' })
+  }
+  if (path === '/unsubscribe' && request.method === 'POST') {
+    const token = cleanText(url.searchParams.get('token'), 300, 'Unsubscribe token')
+    return json(request, env, await unsubscribeContact(env, token), 200, { 'Cache-Control': 'no-store' })
+  }
+
   if (path === '/checkout/session' && request.method === 'POST') {
     const user = await authenticate(request, env)
     return json(request, env, await createCheckoutSession(request, env, user), 201, { 'Cache-Control': 'no-store' })
@@ -2678,7 +3238,7 @@ async function handleRequest(request, env, ctx) {
     const user = await authenticate(request, env)
     return json(request, env, await getAccountPurchases(env, user), 200, { 'Cache-Control': 'no-store' })
   }
-  let match = routeMatch(path, /^\/account\/purchases\/([^/]+)\/delivery$/)
+  match = routeMatch(path, /^\/account\/purchases\/([^/]+)\/delivery$/)
   if (match && request.method === 'POST') {
     const user = await authenticate(request, env)
     await rateLimit(request, env, 'delivery', 20, 3600, user.id)
@@ -2740,18 +3300,45 @@ async function handleRequest(request, env, ctx) {
     return json(request, env, await submitTestimonial(request, env, user, await readJson(request)), 201, { 'Cache-Control': 'no-store' })
   }
 
-  match = routeMatch(path, /^\/media\/([a-z0-9-]{1,60})\/([a-f0-9-]{8,64})\.webp$/)
+  match = routeMatch(path, /^\/media\/([a-z0-9-]{1,60})\/([a-f0-9-]{8,64})\.(webp|mp4|webm)$/)
   if (match && request.method === 'GET') {
     if (!env.MEDIA) throw new HttpError(503, 'Media storage is not configured')
-    const objectKey = `product-media/${decodeURIComponent(match[1])}/${decodeURIComponent(match[2])}.webp`
-    const object = await env.MEDIA.get(objectKey)
+    const productKey = decodeURIComponent(match[1])
+    const mediaId = decodeURIComponent(match[2])
+    const extension = match[3]
+    const objectKey = `product-media/${productKey}/${mediaId}.${extension}`
+    const isVideo = extension === 'mp4' || extension === 'webm'
+    const rangeHeader = request.headers.get('Range') || ''
+    let range = null
+    let totalSize = 0
+    if (isVideo && rangeHeader) {
+      const head = await env.MEDIA.head(objectKey)
+      if (!head) throw new HttpError(404, 'Media not found')
+      totalSize = Number(head.size || 0)
+      const parsed = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader)
+      if (!parsed || !totalSize) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${totalSize}`, ...SECURITY_HEADERS } })
+      let start = parsed[1] ? Number(parsed[1]) : Math.max(0, totalSize - Number(parsed[2] || 0))
+      let end = parsed[2] ? Number(parsed[2]) : totalSize - 1
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= totalSize || end < start) {
+        return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${totalSize}`, ...SECURITY_HEADERS } })
+      }
+      end = Math.min(end, totalSize - 1)
+      range = { offset: start, length: end - start + 1 }
+    }
+    const object = await env.MEDIA.get(objectKey, range ? { range } : undefined)
     if (!object) throw new HttpError(404, 'Media not found')
     const headers = new Headers({
       ...corsHeaders(request, env),
       ...SECURITY_HEADERS,
       'Cache-Control': 'public, max-age=31536000, immutable',
+      ...(isVideo ? { 'Accept-Ranges': 'bytes' } : {}),
     })
     object.writeHttpMetadata(headers)
+    if (range) {
+      headers.set('Content-Range', `bytes ${range.offset}-${range.offset + range.length - 1}/${totalSize}`)
+      headers.set('Content-Length', String(range.length))
+      return new Response(object.body, { status: 206, headers })
+    }
     return new Response(object.body, { status: 200, headers })
   }
 
@@ -2861,6 +3448,39 @@ async function handleRequest(request, env, ctx) {
         aiAvailable: ai.aiAvailable,
       }, 201, { 'Cache-Control': 'no-store' })
     }
+    match = routeMatch(path, /^\/admin\/products\/([^/]+)\/demo-video$/)
+    if (match && request.method === 'POST') {
+      await rateLimit(request, env, 'video-upload', 12, 3600, ownerUser.id)
+      if (!env.MEDIA) throw new HttpError(503, 'Media storage is not configured')
+      const productKey = decodeURIComponent(match[1])
+      const existing = await env.DB.prepare('SELECT * FROM products WHERE key = ?').bind(productKey).first()
+      if (!existing) throw new HttpError(404, 'Product not found')
+      const body = await readJson(request, { maxLength: VIDEO_UPLOAD_JSON_BODY_MAX_LENGTH })
+      const { bytes, extension, contentType } = decodeUploadedVideo(body.video)
+      const mediaId = crypto.randomUUID()
+      const objectKey = `product-media/${productKey}/${mediaId}.${extension}`
+      await env.MEDIA.put(objectKey, bytes, {
+        httpMetadata: { contentType, cacheControl: 'public, max-age=31536000, immutable' },
+      })
+      const mediaPath = `/media/${productKey}/${mediaId}.${extension}`
+      if (existing.demo_video) await env.MEDIA.delete(mediaObjectKey(existing.demo_video)).catch(() => {})
+      const updated = await env.DB.prepare('UPDATE products SET demo_video = ?, updated_at = ? WHERE key = ? RETURNING *')
+        .bind(mediaPath, nowIso(), productKey).first()
+      await invalidatePublicCaches()
+      await writeAuditLog(env, request, ownerUser, 'product.demo_video_upload', { entityType: 'product', entityId: productKey })
+      return json(request, env, productRowToConfig(updated), 201, { 'Cache-Control': 'no-store' })
+    }
+    if (match && request.method === 'DELETE') {
+      const productKey = decodeURIComponent(match[1])
+      const existing = await env.DB.prepare('SELECT * FROM products WHERE key = ?').bind(productKey).first()
+      if (!existing) throw new HttpError(404, 'Product not found')
+      if (existing.demo_video && env.MEDIA) await env.MEDIA.delete(mediaObjectKey(existing.demo_video)).catch(() => {})
+      const updated = await env.DB.prepare("UPDATE products SET demo_video = '', updated_at = ? WHERE key = ? RETURNING *")
+        .bind(nowIso(), productKey).first()
+      await invalidatePublicCaches()
+      await writeAuditLog(env, request, ownerUser, 'product.demo_video_delete', { entityType: 'product', entityId: productKey })
+      return json(request, env, productRowToConfig(updated), 200, { 'Cache-Control': 'no-store' })
+    }
     match = routeMatch(path, /^\/admin\/products\/([^/]+)\/features$/)
     if (match && request.method === 'POST') {
       await rateLimit(request, env, 'media-upload', 60, 3600, ownerUser.id)
@@ -2956,6 +3576,15 @@ async function handleRequest(request, env, ctx) {
       return json(request, env, result, 200, { 'Cache-Control': 'no-store' })
     }
     if (path === '/admin/integrations/status' && request.method === 'GET') return json(request, env, await getIntegrationStatus(env), 200, { 'Cache-Control': 'no-store' })
+    if (path === '/admin/marketing/overview' && request.method === 'GET') {
+      return json(request, env, await getMarketingOverview(env), 200, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/marketing/campaigns' && request.method === 'POST') {
+      await rateLimit(request, env, 'marketing-campaign', 12, 3600, ownerUser.id)
+      const campaign = await createMarketingCampaign(env, ownerUser, await readJson(request))
+      await writeAuditLog(env, request, ownerUser, 'marketing.campaign_create', { entityType: 'marketing_campaign', entityId: campaign.id, details: { audience: campaign.audience, recipientCount: campaign.recipientCount } })
+      return json(request, env, campaign, 201, { 'Cache-Control': 'no-store' })
+    }
 
     // TOTP enrolment. The first response returns the secret and recovery
     // codes (so the owner can scan/print them). The second request confirms
@@ -3079,12 +3708,16 @@ export default {
   },
 }
 
-// One cron tick, two jobs: drive the email queues forward, then prune
+// One cron tick: drive transactional, launch, and marketing queues forward, then prune
 // telemetry rows past their retention window so client_errors cannot grow
 // without bound. Both are idempotent, so a retried tick is harmless.
 async function runScheduledTasks(env) {
-  await processEmailQueues(env)
   if (!env.DB) return
+  // Reclaim a launch whose initial dashboard request could not persist the
+  // durable campaign queue. This runs before Brevo cooldown handling because
+  // it is a D1-only recovery step, not an attempt to deliver email.
+  await recoverPendingLaunchNotifications(env)
+  await processEmailQueues(env)
   try {
     const cutoff = new Date(Date.now() - CLIENT_ERROR_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString()
     await env.DB.prepare('DELETE FROM client_errors WHERE created_at < ?').bind(cutoff).run()

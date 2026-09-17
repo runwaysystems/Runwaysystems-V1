@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft, ArrowUpRight, CheckCircle2, Mail, MessageSquareText, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { deleteAccount, getAccountPurchases, getPurchaseDelivery, getPurchaseFeedbackLink, resendPurchaseDelivery } from '../api/platformApi'
+import { deleteAccount, getAccountEmailPreferences, getAccountPurchases, getPurchaseDelivery, getPurchaseFeedbackLink, resendPurchaseDelivery, updateAccountEmailPreferences } from '../api/platformApi'
 import { AccountButton } from '../components/AuthUI'
 import { Logo } from '../components/Brand'
 import { SUPPORT_EMAIL } from '../components/StorefrontShell'
@@ -50,6 +50,8 @@ export default function AccountPage() {
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleted, setDeleted] = useState(false)
+  const [emailPreferences, setEmailPreferences] = useState(null)
+  const [savingPreferences, setSavingPreferences] = useState(false)
 
   const loadPurchases = useCallback(async () => {
     if (!session?.access_token) return
@@ -67,6 +69,31 @@ export default function AccountPage() {
   useEffect(() => {
     loadPurchases()
   }, [loadPurchases])
+
+  const loadEmailPreferences = useCallback(async () => {
+    if (!session?.access_token) return
+    try {
+      setEmailPreferences(await getAccountEmailPreferences({ token: session.access_token }))
+    } catch {
+      // The preferences card keeps a neutral loading state if the Worker is
+      // temporarily unavailable; it must not interrupt library access.
+    }
+  }, [session?.access_token])
+
+  useEffect(() => { loadEmailPreferences() }, [loadEmailPreferences])
+
+  const saveEmailPreferences = async (enabled) => {
+    if (!session?.access_token || savingPreferences) return
+    setSavingPreferences(true)
+    setError('')
+    try {
+      setEmailPreferences(await updateAccountEmailPreferences(enabled, { token: session.access_token }))
+    } catch (preferenceError) {
+      setError(preferenceError.message || 'Your email preference could not be updated.')
+    } finally {
+      setSavingPreferences(false)
+    }
+  }
 
   const openDelivery = async (purchaseId) => {
     setWorkingId(`delivery:${purchaseId}`)
@@ -211,6 +238,21 @@ export default function AccountPage() {
                 )
               })}
             </div>
+          </section>
+        )}
+
+        {!deleted && profile && (
+          <section className="account-email-preferences" aria-label="Email preferences">
+            <div className="account-email-preferences__copy">
+              <p className="eyebrow">EMAIL PREFERENCES</p>
+              <h2>Choose the updates you receive.</h2>
+              <p>Product access and important account messages are always transactional. Turn this on only if you want occasional Runway Systems product and release updates.</p>
+            </div>
+            <label className="account-marketing-toggle">
+              <input type="checkbox" checked={Boolean(emailPreferences?.marketingConsent)} disabled={!emailPreferences || savingPreferences} onChange={(event) => saveEmailPreferences(event.target.checked)} />
+              <span><b>{savingPreferences ? 'Saving preference…' : 'Email me product updates'}</b><small>{emailPreferences?.marketingConsent ? 'You are subscribed. You can turn this off anytime.' : 'Optional. You will not receive general marketing emails.'}</small></span>
+              <i aria-hidden="true" />
+            </label>
           </section>
         )}
 

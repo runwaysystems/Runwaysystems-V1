@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { getUserProfile, isSupabaseConfigured, supabase, userIsOwner } from '../lib/supabase'
+import { syncSelfContact } from '../api/platformApi'
 
 const AuthContext = createContext(null)
 
@@ -62,6 +63,21 @@ export function AuthProvider({ children }) {
       listener.subscription.unsubscribe()
     }
   }, [])
+
+  // Record the account relationship in the Worker as soon as a Google
+  // session exists. This creates a contact record for account/delivery use;
+  // it deliberately does not opt anybody into promotional marketing.
+  useEffect(() => {
+    if (!session?.access_token) return undefined
+    let cancelled = false
+    syncSelfContact({ token: session.access_token }).catch(() => {
+      // Contact sync is best-effort. A temporary Worker outage must never
+      // block Google sign-in or make a valid library session unusable.
+      if (!cancelled) return null
+      return null
+    })
+    return () => { cancelled = true }
+  }, [session?.access_token])
 
   const openAuth = useCallback(() => {
     setError('')
