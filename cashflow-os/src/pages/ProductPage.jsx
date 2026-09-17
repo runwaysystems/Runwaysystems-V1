@@ -94,7 +94,7 @@ export default function ProductPage({ theme, onToggleTheme, palette, onPaletteCh
             url: `${window.location.origin}${canonicalPath}`,
             priceCurrency: 'USD',
             price: priceNumber(offer.displaySalePrice),
-            availability: 'https://schema.org/InStock',
+            availability: product.status === 'coming_soon' ? 'https://schema.org/PreOrder' : 'https://schema.org/InStock',
           },
         },
       },

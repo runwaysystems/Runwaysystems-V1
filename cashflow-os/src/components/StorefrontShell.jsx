@@ -422,10 +422,17 @@ export function Navbar({ product = null, onBuy, theme, onToggleTheme, palette, o
           </Link>
           <AccountButton />
           {product ? (
-            <>
-              <a className="nav-price" href="#pricing">{offer?.offerActive && <s>{offer.displayOriginalPrice}</s>} {offer?.displaySalePrice}</a>
-              <button className="button button--nav" onClick={onBuy}>{copy.buyLabel} <ArrowUpRight size={15} /></button>
-            </>
+            product.status === 'coming_soon' ? (
+              <>
+                <span className="nav-price">{product.waitlistConfig?.launchTimeline || 'Coming soon'}</span>
+                <a className="button button--nav" href="#notify">Get notified <ArrowUpRight size={15} /></a>
+              </>
+            ) : (
+              <>
+                <a className="nav-price" href="#pricing">{offer?.offerActive && <s>{offer.displayOriginalPrice}</s>} {offer?.displaySalePrice}</a>
+                <button className="button button--nav" onClick={onBuy}>{copy.buyLabel} <ArrowUpRight size={15} /></button>
+              </>
+            )
           ) : (
             <a className="button button--nav" href="#products">{copy.browseLabel} <ArrowUpRight size={15} /></a>
           )}

@@ -56,13 +56,11 @@ export default function CartPage({ theme, onToggleTheme, palette, onPaletteChang
   const [consented, setConsented] = useState(false)
   const liveProducts = storefrontProducts(config, defaultProducts())
 
-  // A product hidden (or deleted) after it was added to the cart must drop out
-  // of the cart too, otherwise the shopper sees a line item priced from the
-  // static catalog and checkout is refused by the Worker with a confusing
-  // "not available" error at the very last step.
+  // A product hidden, deleted, or marked coming-soon after it was added to
+  // the cart must drop out of the cart too, otherwise checkout is refused.
   const unavailableKeys = useMemo(
-    () => keys.filter((key) => productIsUnavailable(config, key)),
-    [config, keys],
+    () => keys.filter((key) => productIsUnavailable(config, key) || (liveProducts.find((p) => p.key === key)?.status === 'coming_soon')),
+    [config, keys, liveProducts],
   )
 
   const items = useMemo(() => keys

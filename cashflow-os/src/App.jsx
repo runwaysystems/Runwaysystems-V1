@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react'
 import { Link, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
 import { ArrowUpRight, Check, Mail, RefreshCw, ShieldCheck } from 'lucide-react'
 import { trackPageView, verifyCheckoutSession, getAccountPurchases } from './api/platformApi'
@@ -9,19 +9,38 @@ import ConsentBanner from './components/ConsentBanner'
 import AnnouncementBar from './components/AnnouncementBar'
 import ScrollToTop from './components/ScrollToTop'
 import Seo from './components/Seo'
-import NotFound from './pages/NotFound'
 import { CheckoutModal, Footer, Navbar, SUPPORT_EMAIL, readStorage, writeStorage, ThemeToggle } from './components/StorefrontShell'
 import { siteCopy } from './lib/siteCopy'
 import { useAuth } from './context/AuthContext'
 import { usePublicProducts } from './hooks/usePublicProducts'
 import { useSecureCheckout } from './hooks/useSecureCheckout'
-import AccountPage from './pages/AccountPage'
-import AdminDashboard, { OwnerRoute } from './pages/AdminDashboard'
-import CartPage from './pages/CartPage'
 import CatalogHome from './pages/CatalogHome'
-import FeedbackPage from './pages/FeedbackPage'
 import ProductPage from './pages/ProductPage'
+import OwnerRoute from './components/OwnerRoute'
 import { buildPoliciesViewModel } from './data/policies'
+
+import NotFound from './pages/NotFound'
+
+const AccountPage = lazy(() => import('./pages/AccountPage'))
+const AdminDashboard = lazy(() => import('./pages/AdminDashboard'))
+const CartPage = lazy(() => import('./pages/CartPage'))
+const FeedbackPage = lazy(() => import('./pages/FeedbackPage'))
+
+function RouteLoadingSkeleton() {
+  return (
+    <div className="shell route-loading-fallback" role="status" aria-label="Loading page">
+      <div className="skeleton-header">
+        <div className="skeleton-shimmer skeleton-title" />
+        <div className="skeleton-shimmer skeleton-sub" />
+      </div>
+      <div className="skeleton-cards-grid">
+        <div className="skeleton-shimmer skeleton-card" />
+        <div className="skeleton-shimmer skeleton-card" />
+        <div className="skeleton-shimmer skeleton-card" />
+      </div>
+    </div>
+  )
+}
 
 function LegalPage({ theme, onToggleTheme, palette, onPaletteChange }) {
   const { checkoutError, clearCheckoutError } = useSecureCheckout()
@@ -255,17 +274,19 @@ function App() {
       <PageTelemetry />
       {!isPreviewRequest() && <AnnouncementBar />}
       <ScrollToTop />
-      <Routes>
-        <Route path="/" element={<CatalogHome theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
-        <Route path="/products/:productKey" element={<ProductPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
-        <Route path="/cart" element={<CartPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
-        <Route path="/terms" element={<LegalPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
-        <Route path="/success" element={<SuccessPage theme={theme} onToggleTheme={toggleTheme} />} />
-        <Route path="/account" element={<AccountPage />} />
-        <Route path="/feedback" element={<FeedbackPage />} />
-        <Route path="/admin" element={<OwnerRoute><AdminDashboard /></OwnerRoute>} />
-        <Route path="*" element={<NotFound theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
-      </Routes>
+      <Suspense fallback={<RouteLoadingSkeleton />}>
+        <Routes>
+          <Route path="/" element={<CatalogHome theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
+          <Route path="/products/:productKey" element={<ProductPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
+          <Route path="/cart" element={<CartPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
+          <Route path="/terms" element={<LegalPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
+          <Route path="/success" element={<SuccessPage theme={theme} onToggleTheme={toggleTheme} />} />
+          <Route path="/account" element={<AccountPage />} />
+          <Route path="/feedback" element={<FeedbackPage />} />
+          <Route path="/admin" element={<OwnerRoute><AdminDashboard /></OwnerRoute>} />
+          <Route path="*" element={<NotFound theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
+        </Routes>
+      </Suspense>
       <AuthModal />
       {/* Chrome that would sit over the preview and obscure the page the
           owner is reviewing. */}

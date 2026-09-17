@@ -41,3 +41,9 @@ export function productIsUnavailable(config, key) {
   if (!catalogIsAuthoritative(config)) return false
   return !(config.products || []).some((product) => product.key === key)
 }
+
+// True when a product is live and can be purchased (not coming soon or hidden).
+export function productIsPurchasable(product) {
+  if (!product) return false
+  return product.status !== 'coming_soon' && product.status !== 'hidden' && product.active !== false
+}

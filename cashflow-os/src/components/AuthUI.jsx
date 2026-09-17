@@ -40,7 +40,7 @@ function UserAvatar({ profile, fallbackClassName = '' }) {
   }, [avatar])
 
   if (avatar && !avatarFailed) {
-    return <img src={avatar} alt="" referrerPolicy="no-referrer" onError={() => setAvatarFailed(true)} />
+    return <img src={avatar} alt="" referrerPolicy="no-referrer" loading="lazy" decoding="async" onError={() => setAvatarFailed(true)} />
   }
 
   return <span className={fallbackClassName || undefined} aria-hidden="true">{initials(profile?.name)}</span>
