@@ -13,6 +13,7 @@ import {
   Cloud,
   Download,
   Eye,
+  Gift,
   ImagePlus,
   LoaderCircle,
   LockKeyhole,
@@ -63,6 +64,8 @@ import ProductPreviewPane from './ProductPreviewPane'
 import AdminContentPanel from './AdminContentPanel'
 import AdminOffersPanel from './AdminOffersPanel'
 import AdminMarketingPanel from './AdminMarketingPanel'
+import AdminComplimentaryAccess from './AdminComplimentaryAccess'
+import AdminBlogPanel from './AdminBlogPanel'
 import { AccountButton } from '../components/AuthUI'
 import { Logo } from '../components/Brand'
 import { isSupabaseConfigured } from '../lib/supabase'
@@ -77,6 +80,7 @@ import AdminClientErrors from '../components/AdminClientErrors'
 const metricConfig = [
   { key: 'totalSales', label: 'Sales', icon: ShoppingBag, format: (value) => value.toLocaleString() },
   { key: 'revenue', label: 'Revenue', icon: CircleDollarSign, format: (value) => `$${value.toLocaleString()}` },
+  { key: 'complimentaryCustomers', label: 'Complimentary', icon: Gift, format: (value) => Number(value || 0).toLocaleString() },
   { key: 'conversionRate', label: 'Conversion', icon: MousePointerClick, format: (value) => `${value}%` },
   { key: 'pageViews', label: 'Page views', icon: Eye, format: (value) => value.toLocaleString() },
   { key: 'averageRating', label: 'Avg. rating', icon: Star, format: (value) => `${value} / 5` },
@@ -343,6 +347,8 @@ const emptyProductDraft = (duplicateFrom = '') => ({
   deliveryUrl: '',
   originalPrice: '',
   salePrice: '',
+  priceCents: 3900,
+  currency: 'USD',
   offerLabel: '',
   offerActive: true,
   status: 'active',
@@ -361,8 +367,6 @@ const emptyProductDraft = (duplicateFrom = '') => ({
     welcomeEmailEnabled: true,
     welcomeEmailSubject: '',
     welcomeEmailBody: '',
-    pollEnabled: false,
-    pollQuestion: '',
     pollOptionsText: '',
   },
 })
@@ -382,6 +386,8 @@ function draftFromProduct(product) {
     deliveryUrl: product.deliveryUrl || '',
     originalPrice: product.originalPrice || '',
     salePrice: product.salePrice || '',
+    priceCents: Number(product.priceCents) || 3900,
+    currency: product.currency || 'USD',
     offerLabel: product.offerLabel || '',
     offerActive: Boolean(product.offerActive),
     status,
@@ -417,6 +423,7 @@ function WaitlistBroadcastManager({ productKey, productName, notify }) {
   const [broadcasting, setBroadcasting] = useState(false)
   const [subject, setSubject] = useState(`${productName || 'Product'} is now live on Runway Systems`)
   const [message, setMessage] = useState(`The wait is over: ${productName || 'This system'} is officially live. As an early-access subscriber, you can get instant access now.`)
+  const [broadcastKey, setBroadcastKey] = useState(() => globalThis.crypto?.randomUUID?.() || `waitlist-${Date.now()}`)
 
   const loadData = useCallback(async () => {
     try {
@@ -467,8 +474,9 @@ function WaitlistBroadcastManager({ productKey, productName, notify }) {
   const handleBroadcast = async () => {
     setBroadcasting(true)
     try {
-      const res = await broadcastLaunchEmail(productKey, { subject, message }, authOptions)
-      notify(res.message || 'Launch announcement broadcast dispatched.')
+      const res = await broadcastLaunchEmail(productKey, { subject, message, idempotencyKey: broadcastKey }, authOptions)
+      setBroadcastKey(globalThis.crypto?.randomUUID?.() || `waitlist-${Date.now()}`)
+      notify(res.message || 'Launch announcement queued.')
       setBroadcastModalOpen(false)
       loadData()
     } catch (err) {
@@ -1069,8 +1077,17 @@ function ProductsPanel({ products, onSave, onDelete, deletingKey, savingKey, onU
 
           <fieldset className="admin-settings-group admin-settings-group--display">
             <legend>What customers see</legend>
-            <p className="admin-settings-group-copy">Display copy only. Confirm the visible price matches the amount behind the Lemon Squeezy variant.</p>
+            <p className="admin-settings-group-copy">The checkout amount is authoritative. Display copy should describe the same amount configured on the Lemon Squeezy variant.</p>
             <div className="admin-settings-group-grid">
+              <label className="portal-field">
+                <span>Checkout price (minor units)</span>
+                <input type="number" min="1" max="100000000" step="1" required value={draft.priceCents} onChange={(event) => update('priceCents', event.target.value)} placeholder="3900" />
+                <small>For USD, enter cents: 3900 means $39.00.</small>
+              </label>
+              <label className="portal-field">
+                <span>Checkout currency</span>
+                <input maxLength="3" required value={draft.currency} onChange={(event) => update('currency', event.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3))} placeholder="USD" />
+              </label>
               <label className="portal-field">
                 <span>Displayed original price</span>
                 <input maxLength="32" value={draft.originalPrice} onChange={(event) => update('originalPrice', event.target.value)} placeholder="$59" />
@@ -1444,6 +1461,8 @@ export default function AdminDashboard() {
         deliveryUrl: draft.deliveryUrl,
         originalPrice: draft.originalPrice,
         salePrice: draft.salePrice,
+        priceCents: Number(draft.priceCents),
+        currency: String(draft.currency || '').toUpperCase(),
         offerLabel: draft.offerLabel,
         offerActive: draft.offerActive,
         status: draft.status || (draft.active ? 'active' : 'hidden'),
@@ -1629,8 +1648,10 @@ export default function AdminDashboard() {
         <nav className="admin-section-nav" aria-label="Dashboard sections">
           {[
             ['#products', 'Products'],
+            ['#complimentary', 'Complimentary access'],
             ['#marketing', 'Email Marketing'],
             ['#content', 'Content studio'],
+            ['#blog', 'Blog'],
             ['#bundles', 'Bundles'],
             ['#offers', 'Offers'],
             ['#moderation', 'Reviews'],
@@ -1667,7 +1688,8 @@ export default function AdminDashboard() {
           <ConversionChart analytics={analytics} />
         </section>
 
-        <AdminMarketingPanel products={products} notify={setNotice} />
+        <AdminComplimentaryAccess products={products} notify={setNotice} authOptions={authOptions} />
+        <AdminMarketingPanel products={products} notify={setNotice} authOptions={authOptions} />
 
         <ProductsPanel
           products={products}
@@ -1709,6 +1731,7 @@ export default function AdminDashboard() {
           savingKey={savingProductKey}
           notify={setNotice}
         />
+        <AdminBlogPanel authOptions={authOptions} notify={setNotice} />
         <TestimonialTable items={testimonials} onModerate={moderate} pendingId={moderatingId} />
 
         <section className="admin-section-card" id="operations">

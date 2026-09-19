@@ -27,6 +27,12 @@ export function useSecureCheckout() {
       if (!allowedHost) {
         throw new Error('The checkout destination could not be verified.')
       }
+      if (!checkout.sessionId) throw new Error('Lemon Squeezy did not return a checkout session identifier.')
+      window.sessionStorage.setItem('runway.pending-checkout.v1', JSON.stringify({
+        sessionId: checkout.sessionId,
+        userId: session.user?.id || '',
+        createdAt: Date.now(),
+      }))
       window.location.assign(destination.toString())
     } catch (checkoutError) {
       setError(checkoutError.message || 'Secure checkout could not be started. Please try again.')

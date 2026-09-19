@@ -58,6 +58,7 @@ export default function Seo({
   ogImage = DEFAULT_OG_IMAGE_PATH,
   ogImageAlt = DEFAULT_OG_IMAGE_ALT,
   noindex = false,
+  feedPath = '',
   jsonLd = [],
 }) {
   useEffect(() => {
@@ -82,13 +83,20 @@ export default function Seo({
     upsertMeta('name', 'twitter:title', title)
     upsertMeta('name', 'twitter:description', description)
     upsertLink('canonical', canonical)
+    if (feedPath) {
+      let feed = document.head.querySelector('link[data-seo-rss]')
+      if (!feed) { feed = document.createElement('link'); feed.dataset.seoRss = 'true'; document.head.appendChild(feed) }
+      feed.rel = 'alternate'; feed.type = 'application/rss+xml'; feed.title = 'Runway Systems Blog'
+      feed.href = `${window.location.origin}${feedPath}`
+    }
 
     for (const { id, data } of jsonLd) upsertJsonLd(id, data)
 
     return () => {
       for (const { id } of jsonLd) document.getElementById(id)?.remove()
+      if (feedPath) document.head.querySelector('link[data-seo-rss]')?.remove()
     }
-  }, [title, description, canonicalPath, ogType, ogImage, ogImageAlt, noindex, JSON.stringify(jsonLd)])
+  }, [title, description, canonicalPath, ogType, ogImage, ogImageAlt, noindex, feedPath, JSON.stringify(jsonLd)])
 
   return null
 }

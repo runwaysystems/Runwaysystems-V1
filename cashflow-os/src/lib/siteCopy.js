@@ -14,8 +14,8 @@ const SITE_COPY_DEFAULTS = {
     description: 'A suite of connected Google Sheets products for freelancers, consultants, and small teams. One-time purchase. No subscription. Your data stays in your Drive.',
   },
   footer: {
-    tagline: 'The connected Google Sheets product suite for independent businesses.',
-    motto: 'Built for clarity. Designed for action.',
+    tagline: 'Practical Google Sheets systems for clearer finances, stronger client work, and calmer independent business.',
+    motto: 'Built for freelancers, consultants, creators, studios, and small teams.',
     supportNotes: ['Google Sheets only', 'Mon-Fri support'],
     disclaimer: 'These products are tools, not financial or tax advice.',
     socials: [

@@ -145,6 +145,7 @@ vite.config.ts.timestamp-*
 # Cloudflare Worker local state and local-only secrets
 .wrangler/
 .dev.vars
+!.dev.vars.example
 
 # Database backups contain real customer data and must never be committed.
 # They belong in the R2 backups bucket or in workflow artifacts only.

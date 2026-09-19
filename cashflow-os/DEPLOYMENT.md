@@ -59,9 +59,10 @@ npx wrangler r2 bucket create runway-product-media
 npx wrangler d1 migrations apply cashflow-os-platform --remote --config worker/wrangler.toml
 ```
 
-Five migrations run: core tables with Lemon Squeezy order identifiers,
-products with variant IDs, media columns, feature details, and the content
-studio.
+Wrangler applies every pending ordered migration in `worker/migrations/`.
+These cover core commerce, catalog/content, consent, security and audit data,
+telemetry, waitlists, durable marketing delivery, exact checkout correlation,
+legacy audit-IP cleanup, exact-email complimentary access, and Runway Systems Blog posts, revisions, media usage, redirects, and publication automation.
 
 ### 2.4 Configure Worker variables and secrets
 
@@ -83,14 +84,14 @@ Then set secrets (never commit these):
 npx wrangler secret put LEMONSQUEEZY_API_KEY --config worker/wrangler.toml
 npx wrangler secret put LEMONSQUEEZY_WEBHOOK_SECRET --config worker/wrangler.toml
 npx wrangler secret put SUPABASE_ANON_KEY --config worker/wrangler.toml
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --config worker/wrangler.toml
 npx wrangler secret put BREVO_API_KEY --config worker/wrangler.toml
-npx wrangler secret put GOOGLE_SHEETS_COPY_URL --config worker/wrangler.toml
 npx wrangler secret put RATE_LIMIT_SALT --config worker/wrangler.toml
 npx wrangler secret put FEEDBACK_SIGNING_SECRET --config worker/wrangler.toml
+npx wrangler secret put TOTP_ENCRYPTION_KEY --config worker/wrangler.toml
 ```
 
-Generate `RATE_LIMIT_SALT` and `FEEDBACK_SIGNING_SECRET` as random strings
-of at least 32 bytes.
+Generate `RATE_LIMIT_SALT`, `FEEDBACK_SIGNING_SECRET`, and `TOTP_ENCRYPTION_KEY` as distinct random strings of at least 32 bytes. `TOTP_ENCRYPTION_KEY` protects both the admin authenticator seed and the retryable encrypted copy of pending complimentary claim tokens; rotating it requires resetting TOTP and resending pending invitations. The Supabase service-role key is required for fail-closed webhook ownership verification and must remain Worker-only.
 
 **Optional: AI image scanning.** In the Cloudflare dashboard, open the
 Worker, go to **Settings → Bindings → Add**, and add a **Workers AI**
@@ -128,7 +129,8 @@ variables** (they are compiled into the frontend at build time):
 
 | Variable | Value |
 |---|---|
-| `VITE_API_BASE_URL` | Worker URL, e.g. `https://cashflow-os-platform.YOUR_SUBDOMAIN.workers.dev`. Production falls back to the Runway Systems Worker if this is missing, but set it explicitly for staging/custom Worker domains. |
+| `VITE_API_BASE_URL` | **Required.** Exact Worker URL for this environment, e.g. `https://cashflow-os-platform.YOUR_SUBDOMAIN.workers.dev`. The browser API, first-response Blog renderer, RSS, sitemap, and LLM discovery proxies use it; there is no cross-environment production fallback. |
+| `JOURNAL_SOURCE_URL` | Optional Pages runtime override for the same Worker base URL. Use only if first-response Blog rendering should read a different controlled API deployment. |
 | `VITE_SUPPORT_EMAIL` | Public support address |
 | `VITE_SUPABASE_URL` | Supabase project URL |
 | `VITE_SUPABASE_ANON_KEY` | Supabase public anon key (public by design; see the RLS requirement below) |
@@ -142,7 +144,7 @@ variables** (they are compiled into the frontend at build time):
 > data lives in D1, accessed through the Worker). If you ever add
 > client-side Supabase reads, enable Row Level Security on every Supabase
 > table first. The service_role key must never appear in a `VITE_` variable
-> or anywhere client-side — it never needs to be set at all for this app.
+> or anywhere client-side. It is required only as a secret on the Worker for webhook ownership checks.
 
 ### 3.2 Build settings
 
@@ -152,6 +154,13 @@ variables** (they are compiled into the frontend at build time):
 | Root directory | `cashflow-os` |
 | Build command | `npm ci && npm run build` |
 | Build output | `dist` |
+
+Vite treats `CF_PAGES=1` (set automatically by Cloudflare Pages) as a strict
+production build. It refuses missing, localhost, placeholder, or non-HTTPS API
+and Supabase URLs; it also rejects secret-shaped `VITE_` names. Direct-upload
+builds run by `scripts/deploy.sh` set the equivalent
+`RUNWAY_PRODUCTION_BUILD=1` guard. Plain `npm run dev` and local validation
+builds remain usable without production credentials.
 
 ### 3.3 Deploy
 
@@ -207,6 +216,23 @@ separate tax registration is needed on your side.
 - [ ] **Admin → Content studio** loads and lets you edit suite copy, a
       product's marketing content, and the legal policies; saving one flows
       to the public storefront within the config cache window (60s)
+- [ ] **Admin → Blog** creates a private AI-import draft, saves visual and
+      Markdown edits, manages categories/media, previews all four layouts,
+      and publishes or schedules without a storefront deployment
+- [ ] A published Blog article returns semantic first-response HTML at its
+      stable `/blog/:slug` URL and appears in `/sitemap.xml`, `/blog/feed.xml`,
+      `/llms.txt`, and `/llms-full.txt`; drafts and future schedules do not
+- [ ] Blog image upload accepts a real PNG/JPEG/WebP, requires useful alt
+      text before publication, and refuses deletion while the image is in use
+- [ ] The signup section above the original-design site footer returns a generic
+      pending response, sends a Brevo confirmation link with a fragment token,
+      requires the explicit POST confirmation, rejects replay, enters the
+      consented lead audience, and unsubscribes through the existing one-time
+      suppression flow
+- [ ] Newsletter signup appears on the homepage, product pages, Blog index, and
+      published articles only—not cart, account, claim, confirmation, admin,
+      legal, or error contexts; `/newsletter/confirm` is noindex,
+      excluded from the sitemap, and disallowed in robots
 - [ ] **Admin → Integrations** shows Lemon Squeezy, Supabase, Brevo, and
       Trustpilot connected (and AI if configured)
 - [ ] **Admin → Products** has Lemon Squeezy variant IDs and delivery links
@@ -214,9 +240,14 @@ separate tax registration is needed on your side.
 - [ ] Test purchase in Lemon Squeezy test mode: checkout, success page,
       account library, delivery email, refund revocation
 - [ ] Multi-product cart checkout grants one entitlement per product
+- [ ] **Admin → Complimentary access** sends a claim-only email with no Sheets
+      URL; the wrong Google email is rejected, the exact email receives all
+      selected products, replay fails, and paid sales/revenue stay unchanged
 - [ ] Cookie banner gates the Trustpilot widget until acceptance
 - [ ] Upload a feature screenshot; check the media URL serves and (with AI
       configured) the heading was auto-written
+- [ ] Supabase's redirect allowlist contains the exact production `/account`
+      and `/claim` URLs (plus only controlled staging equivalents)
 - [ ] **Supabase rate limits**: this app has no login, OTP, or password-reset
       endpoints of its own (Google OAuth via Supabase). Enable rate limits on
       those flows in Supabase's dashboard, since only Supabase can throttle
@@ -234,19 +265,21 @@ The storefront ships with full SEO out of the box:
 - **Per-page metadata** (title, description, canonical, Open Graph, Twitter
   cards) and **JSON-LD structured data** (Organization, WebSite, Product
   with Offer, BreadcrumbList, FAQPage) are rendered by the Seo component on
-  every route. Google renders the JavaScript, so pages for products created
-  later in the admin panel are fully crawlable without redeploys.
+  every public route. Google renders the JavaScript, so pages for products
+  created later in the admin panel are crawlable without redeploys.
 - **Sitemaps:** `npm run build` writes `dist/sitemap.xml` and
   `dist/robots.txt` for every code-defined route. Keep that generated XML in
   the build so `/sitemap.xml` can fall back to real XML instead of the React
   404 page. The Worker also serves a dynamic `/sitemap.xml` that includes
-  active products from the dashboard and automatically omits hidden or deleted
-  products; `functions/sitemap.xml.js` exposes that Worker-backed XML on the
-  storefront host via `SITEMAP_SOURCE_URL`, `VITE_API_BASE_URL`, or the
-  production Worker fallback, and falls back to the static file if the Worker is
+  active products and published Blog articles with `lastmod` while omitting hidden products and every private Blog state;
+  `functions/sitemap.xml.js` exposes that Worker-backed XML on the
+  storefront host via `SITEMAP_SOURCE_URL` or `VITE_API_BASE_URL`, and falls
+  back to the static file if no source is configured or the Worker is
   unavailable. Do not use a `public/_redirects` `200` rule to proxy the external
   Worker URL: Cloudflare Pages only supports `200` proxy rewrites to relative
   paths.
+- **Blog first response:** `functions/blog/[slug].js` fetches only the Worker's published projection and emits semantic article HTML, canonical/social metadata, RSS discovery, and BlogPosting/Breadcrumb JSON-LD before React boots. Confirm direct article requests return 200, old slugs return 308, private slugs return 404 with `X-Robots-Tag: noindex`, and an unreachable Worker returns 503.
+- **Discovery:** Pages proxies `/blog/feed.xml`, `/llms.txt`, and `/llms-full.txt` to the dynamic Worker outputs. These files list published records only; `llms.txt` is an emerging convention and does not guarantee indexing, citation, or ranking.
 - **Build domain:** set `SITE_URL=https://your-domain.com` when building so
   the static sitemap and canonical URLs use your production domain.
 - **Crawl hygiene:** /account, /feedback, /admin, /success, /cart, and the
@@ -294,27 +327,27 @@ override the Pages project name (default `runway-systems-storefront`).
 Deployment is only half of running the platform. After the first deploy,
 finish the operational setup too:
 
-**CI (no setup needed)**. Every push and pull request runs
-`.github/workflows/ci.yml`: storefront build, the jsdom and browser
-regressions, and the full Worker API regression against a local D1 + mock
-Supabase. A red CI run means do not deploy.
+**CI (activation required).** Copy `docs/workflow-templates/ci.yml` to
+`.github/workflows/ci.yml` using an account with workflow write permission.
+Once active, every push and pull request runs the storefront build, jsdom and
+browser regressions, and the full Worker API regression against a local D1 and
+mock Supabase. A red CI run means do not deploy.
 
-**Nightly database backups.** `.github/workflows/backup.yml` exports D1
-every night into the R2 bucket `runway-d1-backups` plus a 30-day workflow
-artifact. Arm it by adding two repository secrets:
+**Nightly database backups (activation required).** Copy
+`docs/workflow-templates/backup.yml` to `.github/workflows/backup.yml`, then arm
+it with repository secrets `CLOUDFLARE_API_TOKEN` (D1 read/export and R2 edit
+access) and `CLOUDFLARE_ACCOUNT_ID`, plus repository variable
+`CLOUDFLARE_BACKUP_BUCKET`. Once active, it exports D1 every night into a
+private R2 bucket. The workflow fails visibly when configuration is missing and
+does not copy customer data into GitHub artifacts. A manual dump is available
+with `./scripts/backup-d1.sh --bucket YOUR_PRIVATE_BUCKET`.
 
-- `CLOUDFLARE_API_TOKEN` - a token with D1 read/export and R2 edit access
-- `CLOUDFLARE_ACCOUNT_ID` - from the Cloudflare dashboard overview page
-
-Until the secrets exist the workflow skips itself silently. A manual dump
-any time: `./scripts/backup-d1.sh --bucket runway-d1-backups`.
-
-**Uptime monitoring.** `.github/workflows/uptime.yml` probes the Worker's
-`/health` and the storefront every 15 minutes; GitHub emails repository
-watchers when it fails. Arm it with two repository variables:
-`WORKER_HEALTH_URL` (e.g. `https://<worker>.workers.dev/health`) and
-`STOREFRONT_URL`. GitHub scheduled runs can lag under load, so for
-paging-grade alerts also point a dedicated monitor (UptimeRobot, Better
-Stack) at `/health`.
+**Uptime monitoring (activation required).** Copy
+`docs/workflow-templates/uptime.yml` to `.github/workflows/uptime.yml`, then set
+repository variables `PLATFORM_HEALTH_URL` and `STOREFRONT_HEALTH_URL` to their
+complete `/health` URLs. Once active, it probes both JSON health endpoints every
+10 minutes; GitHub emails repository watchers when it fails. GitHub scheduled
+runs can lag under load, so for paging-grade alerts also point a dedicated
+monitor (UptimeRobot, Better Stack) at `/health`.
 
 **Full restore and incident playbooks**: see [RECOVERY.md](RECOVERY.md).

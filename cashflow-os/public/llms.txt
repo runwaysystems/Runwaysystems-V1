@@ -10,6 +10,7 @@
 - Individual product pages for each Google Sheets product
 - A cart and secure checkout flow
 - A buyer account area for verified purchases
+- The public Runway Systems Blog with practical finance, client, project, and operations articles
 - An owner-only admin dashboard for catalog, content, and operations
 
 ## Public pages
@@ -18,6 +19,8 @@
 - https://runwaysystems.cloud/products/client-crm-os - Client CRM OS product page
 - https://runwaysystems.cloud/products/project-os - Project OS product page
 - https://runwaysystems.cloud/products/invoice-os - Invoice OS product page
+- https://runwaysystems.cloud/blog - Runway Systems Blog index
+- https://runwaysystems.cloud/blog/feed.xml - RSS discovery feed
 - https://runwaysystems.cloud/terms - Terms and policy content
 
 ## Products

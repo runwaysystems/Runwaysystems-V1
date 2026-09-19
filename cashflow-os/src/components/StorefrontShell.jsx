@@ -27,6 +27,7 @@ import { useCart } from '../context/CartContext'
 import { openConsentPreferences } from './ConsentBanner'
 import { getPublicConfigCache } from '../lib/publicConfigCache'
 import { socialIconName, useSiteCopy, visibleSocials } from '../lib/siteCopy'
+import NewsletterSignup from './NewsletterSignup'
 
 // Lucide icon registry keyed by the names exposed from siteCopy. Anything not
 // in this map falls back to a neutral Link glyph on the storefront.
@@ -414,6 +415,7 @@ export function Navbar({ product = null, onBuy, theme, onToggleTheme, palette, o
         <div className="nav-links" aria-label="Page sections">
           {!onHome && <Link className="nav-home-link" to="/"><ArrowLeft size={13} /> {product ? 'All products' : 'Runway Systems'}</Link>}
           {links.map(([label, href]) => <a key={label} href={hrefFor(href)}>{label}</a>)}
+          <Link to="/blog">Blog</Link>
         </div>
         <div className="nav-actions">
           <Link className={cx('nav-cart', count > 0 && 'has-items')} to="/cart" aria-label={`Cart with ${count} ${count === 1 ? 'product' : 'products'}`}>
@@ -444,6 +446,7 @@ export function Navbar({ product = null, onBuy, theme, onToggleTheme, palette, o
       <div id="mobile-menu" className={cx('mobile-menu', open && 'is-open')}>
         {!onHome && <Link className="mobile-home-link" to="/" onClick={() => setOpen(false)}><ArrowLeft size={13} /> {product ? 'All products' : 'Runway Systems'}</Link>}
         <Link className="mobile-cart-link" to="/cart" onClick={() => setOpen(false)}><ShoppingBag size={14} /> Cart {count > 0 && `(${count})`}</Link>
+        <Link to="/blog" onClick={() => setOpen(false)}>Blog</Link>
         {links.map(([label, href]) => (
           <a key={label} href={hrefFor(href)} onClick={() => setOpen(false)}>{label}</a>
         ))}
@@ -457,12 +460,18 @@ export function Navbar({ product = null, onBuy, theme, onToggleTheme, palette, o
   )
 }
 
-export function Footer({ products = [], supportEmail = null }) {
+export function Footer({ products = [], supportEmail = null, newsletter = undefined }) {
   const fullCopy = useSiteCopy()
   const copy = fullCopy.footer
   const socials = visibleSocials(fullCopy)
   const email = supportEmail || getSupportEmail()
   const footerRef = useRef(null)
+  const footerVisualRef = useRef(null)
+  const { pathname } = useLocation()
+  const routeShowsNewsletter = pathname === '/' || pathname.startsWith('/products/') || pathname === '/blog' || pathname.startsWith('/blog/')
+  const showNewsletter = newsletter ?? routeShowsNewsletter
+  const newsletterSource = pathname === '/' ? 'home' : pathname.startsWith('/products/') ? 'product' : pathname === '/blog' ? 'blog_index' : 'blog_article'
+  const newsletterHref = showNewsletter ? '#blog-newsletter' : '/blog#blog-newsletter'
 
   // GSAP typography reveal: the wordmark rises out of its masks with a
   // tracking settle while the 3D backdrop drifts on scroll. Skipped entirely
@@ -477,7 +486,7 @@ export function Footer({ products = [], supportEmail = null }) {
         {
           yPercent: -7,
           ease: 'none',
-          scrollTrigger: { trigger: footerRef.current, start: 'top bottom', end: 'bottom top', scrub: 1 },
+          scrollTrigger: { trigger: footerVisualRef.current, start: 'top bottom', end: 'bottom top', scrub: 1 },
         },
       )
       gsap.fromTo(
@@ -510,14 +519,17 @@ export function Footer({ products = [], supportEmail = null }) {
 
   return (
     <footer className="footer" ref={footerRef}>
-      <div className="footer-3d-backdrop" aria-hidden="true">
-        <div className="footer-3d-horizon" />
-        <div className="footer-3d-aura" />
-        <div className="footer-vignette" />
-        <div className="footer-particles">{Array.from({ length: 14 }, (_, index) => <i key={index} style={{ '--particle': index }} />)}</div>
-      </div>
+      {showNewsletter && <NewsletterSignup source={newsletterSource} />}
 
-      <div className="shell footer-reveal" aria-hidden="true">
+      <div className="footer-original" ref={footerVisualRef}>
+        <div className="footer-3d-backdrop" aria-hidden="true">
+          <div className="footer-3d-horizon" />
+          <div className="footer-3d-aura" />
+          <div className="footer-vignette" />
+          <div className="footer-particles">{Array.from({ length: 14 }, (_, index) => <i key={index} style={{ '--particle': index }} />)}</div>
+        </div>
+
+        <div className="shell footer-reveal" aria-hidden="true">
         <RunwayMark className="footer-reveal__mark" />
         <p className="footer-reveal__eyebrow">RUNWAY SYSTEMS · PRODUCT SUITE</p>
         <p className="footer-reveal__title">
@@ -529,8 +541,8 @@ export function Footer({ products = [], supportEmail = null }) {
       <div className="shell footer-main">
         <div className="footer-brand"><Logo light /><p>{copy.tagline}</p><span>{copy.motto}</span></div>
         <div className="footer-links">
-          <div><b>Suite</b>{products.map((product) => <Link key={product.key} to={`/products/${product.key}`}>{product.name}</Link>)}</div>
-          <div><b>Legal</b><Link to="/terms#terms">Terms of use</Link><Link to="/terms#privacy">Privacy</Link><Link to="/terms#refunds">Refund policy</Link><button className="footer-link-button" type="button" onClick={openConsentPreferences}>Cookie preferences</button></div>
+          <div><b>Suite</b>{products.map((product) => <Link key={product.key} to={`/products/${product.key}`}>{product.name}</Link>)}<Link to="/blog">Runway Systems Blog</Link>{showNewsletter ? <a href={newsletterHref}>Newsletter</a> : <Link to={newsletterHref}>Newsletter</Link>}</div>
+          <div><b>Legal</b><Link to="/terms#terms">Terms of use</Link><Link to="/terms#privacy">Privacy</Link><Link to="/terms#refunds">Refund policy</Link><button className="footer-link-button" type="button" onClick={openConsentPreferences}>Cookie preferences</button><a href="/blog/feed.xml">RSS</a></div>
           {socials.length > 0 && (
             <div className="footer-socials">
               <b>Follow</b>
@@ -552,9 +564,10 @@ export function Footer({ products = [], supportEmail = null }) {
           <div><b>Support</b><a href={`mailto:${email}`}><Mail size={14} /> {email}</a>{(copy.supportNotes || []).map((note) => <span key={note}>{note}</span>)}</div>
         </div>
       </div>
-      <div className="shell footer-bottom">
-        <span>© {new Date().getFullYear()} {SUITE_NAME}. All rights reserved.</span>
-        <span>{copy.disclaimer}</span>
+        <div className="shell footer-bottom">
+          <span>© {new Date().getFullYear()} {SUITE_NAME}. All rights reserved.</span>
+          <span>{copy.disclaimer}</span>
+        </div>
       </div>
     </footer>
   )

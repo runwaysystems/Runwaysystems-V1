@@ -356,8 +356,8 @@ export function WaitlistSignupBox({ product, source = 'hero' }) {
     auth = null
   }
   const profileEmail = auth?.profile?.email || ''
-  const userId = auth?.user?.id || ''
   const [email, setEmail] = useState(profileEmail)
+  const [marketingOptIn, setMarketingOptIn] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
   const [error, setError] = useState('')
@@ -385,9 +385,9 @@ export function WaitlistSignupBox({ product, source = 'hero' }) {
     try {
       const res = await subscribeWaitlist(product.key, {
         email: email.trim(),
-        userId,
         source: `product_page_${source}`,
-      })
+        marketingOptIn,
+      }, { token: auth?.session?.access_token })
       setSubmitted(true)
       if (res?.poll && Array.isArray(res.poll.options) && res.poll.options.length > 0) {
         setPoll(res.poll)
@@ -403,10 +403,10 @@ export function WaitlistSignupBox({ product, source = 'hero' }) {
     if (voting || voted) return
     setVoting(true)
     try {
-      await voteWaitlistPoll(product.key, { email: email.trim(), vote: option })
+      await voteWaitlistPoll(product.key, { token: poll?.token, vote: option })
       setVoted(true)
-    } catch {
-      setVoted(true)
+    } catch (voteError) {
+      setError(voteError.message || 'Your vote could not be saved. Please try again.')
     } finally {
       setVoting(false)
     }
@@ -442,7 +442,11 @@ export function WaitlistSignupBox({ product, source = 'hero' }) {
               {submitting ? 'Joining...' : <>Notify me when live <ArrowRight size={15} /></>}
             </button>
           </div>
-          {error && <p className="waitlist-form__error">{error}</p>}
+          <label className="waitlist-marketing-consent">
+            <input type="checkbox" checked={marketingOptIn} onChange={(event) => setMarketingOptIn(event.target.checked)} disabled={submitting} />
+            <span>Also send me occasional product updates and offers. Optional; unsubscribe any time.</span>
+          </label>
+          {error && <p className="waitlist-form__error" role="alert">{error}</p>}
           <p className="waitlist-form__note">
             <LockKeyhole size={12} /> We will send one email from <b>info@runwaysystems.cloud</b> when live. No spam.
           </p>

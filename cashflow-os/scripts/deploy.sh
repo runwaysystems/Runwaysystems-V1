@@ -58,17 +58,18 @@ preflight() {
 
   test -f public/_headers || fail "public/_headers is missing (required for Pages security headers)"
 
-  # Build-time frontend variables come from .env or the Pages dashboard.
-  # VITE_API_BASE_URL is still recommended for staging/custom Worker domains.
-  # Production builds have a Runway Systems Worker fallback so the deployed
-  # dashboard does not silently save product edits to browser-only mock data.
-  if [ -z "${VITE_API_BASE_URL:-}" ] && ! grep -qs '^VITE_API_BASE_URL=.\+' .env.example; then
-    say "warning: VITE_API_BASE_URL is not set; the storefront will use the production Worker fallback. Set it explicitly for staging or custom Worker domains."
+  # Production/staging browser builds never fall back to another environment.
+  # Pages build variables are not injected into a local direct-upload build,
+  # so require the API endpoint whenever this command builds the storefront.
+  if [ "$MODE" != "worker" ]; then
+    for variable in VITE_API_BASE_URL VITE_SUPPORT_EMAIL VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY; do
+      [ -n "${!variable:-}" ] || fail "$variable is required for Pages builds"
+    done
   fi
 
   # Secrets can only be verified on the deployed Worker; list what is expected.
   say "expected Worker secrets (Lemon Squeezy): LEMONSQUEEZY_API_KEY LEMONSQUEEZY_WEBHOOK_SECRET"
-  say "expected Worker secrets (shared): SUPABASE_ANON_KEY RESEND_API_KEY GOOGLE_SHEETS_COPY_URL RATE_LIMIT_SALT FEEDBACK_SIGNING_SECRET"
+  say "expected Worker secrets (platform): SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY BREVO_API_KEY RATE_LIMIT_SALT FEEDBACK_SIGNING_SECRET TOTP_ENCRYPTION_KEY"
 
   ok "pre-flight passed"
 }
@@ -77,7 +78,7 @@ preflight() {
 build_frontend() {
   say "building the storefront"
   npm ci --no-audit --no-fund
-  npm run build
+  RUNWAY_PRODUCTION_BUILD=1 npm run build
   ok "storefront built into dist/"
 }
 

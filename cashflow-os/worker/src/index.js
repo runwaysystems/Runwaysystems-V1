@@ -8,9 +8,19 @@ const REVIEW_DELAY_MS = 72 * 60 * 60 * 1000
 const CONSENT_POLICY_VERSION = '2026-08-17'
 const CONSENT_TEXT = 'I agree to the Terms, Privacy Policy and Refund Policy, and I understand these are digital products delivered instantly, so my right to cancel ends once I access my copy.'
 const FEEDBACK_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+const COMPLIMENTARY_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const COMPLIMENTARY_POLICY_VERSION = '2026-09-18'
+const COMPLIMENTARY_POLICY_TEXT = 'By claiming this complimentary access, I agree to the Runway Systems Terms and Privacy Policy and understand that the product license applies even though no payment was taken.'
+const NEWSLETTER_CONFIRMATION_TTL_MS = 48 * 60 * 60 * 1000
+const NEWSLETTER_POLICY_VERSION = '2026-09-19'
+const NEWSLETTER_SOURCES = new Set(['home', 'product', 'blog_index', 'blog_article', 'site_footer'])
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' }
 
 const PRODUCT_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{1,40}$/
+const BLOG_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const BLOG_LAYOUTS = ['editorial', 'tutorial', 'field-note', 'case-study']
+const BLOG_PUBLIC_WHERE = "p.status = 'published' AND p.published_at IS NOT NULL AND p.published_at <= ? AND p.deleted_at IS NULL"
+const BLOG_TRASH_RETENTION_DAYS = 30
 const KNOWN_PRODUCT_ICONS = ['spreadsheet', 'users', 'gauge', 'receipt', 'folder', 'layers', 'calendar', 'kanban']
 const KNOWN_PRODUCT_ACCENTS = ['lime', 'blue', 'violet', 'peach', 'mint', 'yellow', 'lavender']
 
@@ -272,6 +282,7 @@ async function writeAuditLog(env, request, user, action, { entityType = '', enti
   if (!env.DB) return
   try {
     const ip = request.headers.get('CF-Connecting-IP') || ''
+    const ipHash = ip && env.RATE_LIMIT_SALT ? await sha256Hex(`${env.RATE_LIMIT_SALT}:admin-audit:${ip}`) : ''
     const now = nowIso()
     await env.DB.prepare(`
       INSERT INTO admin_audit_log (id, subject_id, subject_email, action, entity_type, entity_id, details, ip, created_at)
@@ -284,7 +295,7 @@ async function writeAuditLog(env, request, user, action, { entityType = '', enti
       String(entityType || '').slice(0, 40),
       String(entityId || '').slice(0, 80),
       JSON.stringify(details || {}).slice(0, 4000),
-      ip.slice(0, 64),
+      ipHash,
       now,
     ).run()
   } catch (error) {
@@ -340,7 +351,7 @@ async function getDeliveryIssues(env) {
            delivery_email_last_error AS lastError, delivery_email_next_eligible_at AS nextEligibleAt,
            created_at AS createdAt, updated_at AS updatedAt
     FROM purchases
-    WHERE payment_status = 'paid'
+    WHERE payment_status = 'paid' AND access_source = 'paid' AND access_status = 'active'
       AND (
         delivery_email_status = 'failed'
         OR (delivery_email_status = 'sending' AND updated_at <= ?)
@@ -380,22 +391,20 @@ function isPlaceholderValue(value) {
 // uptime checks refuse to route traffic to a half-configured Worker.
 async function readinessReport(env) {
   const missing = []
+  const advisories = []
   const settings = await getSettings(env)
   const required = [
     ['APP_ORIGIN', 'Storefront origin allowlist'],
     ['SUPABASE_URL', 'Supabase project URL'],
     ['SUPABASE_ANON_KEY', 'Supabase anon key secret'],
+    ['SUPABASE_SERVICE_ROLE_KEY', 'Supabase service role key'],
+    ['TOTP_ENCRYPTION_KEY', 'Admin TOTP encryption and challenge key'],
     ['BREVO_API_KEY', 'Brevo API key'],
     ['EMAIL_FROM_DELIVERY', 'Brevo delivery sender address'],
     ['EMAIL_FROM_INFO', 'Brevo info sender address'],
     ['RATE_LIMIT_SALT', 'Rate-limit salt'],
     ['FEEDBACK_SIGNING_SECRET', 'Feedback signing secret'],
   ]
-  // SUPABASE_SERVICE_ROLE_KEY is recommended but not required: when
-  // missing, the webhook ownership re-check is skipped (logged as
-  // warning) and the HMAC signature remains the primary gate. Surface
-  // the gap as an advisory missing item so the owner knows to add it.
-  if (!env.SUPABASE_SERVICE_ROLE_KEY) missing.push({ name: 'SUPABASE_SERVICE_ROLE_KEY', label: 'Supabase service role key (recommended for webhook ownership re-check)' })
   required.push(['LEMONSQUEEZY_API_KEY', 'Lemon Squeezy API key'], ['LEMONSQUEEZY_WEBHOOK_SECRET', 'Lemon Squeezy webhook signing secret'])
   if (!settings.lemonSqueezyStoreId) missing.push({ name: 'lemonSqueezyStoreId', label: 'Lemon Squeezy store ID setting' })
   for (const [name, label] of required) {
@@ -404,7 +413,7 @@ async function readinessReport(env) {
   if (!env.OWNER_EMAIL || isPlaceholderValue(String(env.OWNER_EMAIL))) missing.push({ name: 'OWNER_EMAIL', label: 'Owner account email' })
   if (!env.DB) missing.push({ name: 'DB', label: 'D1 database binding' })
   if (!env.MEDIA) missing.push({ name: 'MEDIA', label: 'R2 media bucket binding' })
-  return { ready: missing.length === 0, missing }
+  return { ready: missing.length === 0, missing, advisories }
 }
 
 function corsHeaders(request, env) {
@@ -413,7 +422,7 @@ function corsHeaders(request, env) {
   if (!origin || !allowed.includes(origin.replace(/\/$/, ''))) return {}
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Correlation-Id',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Correlation-Id, X-Admin-Challenge, X-Admin-TOTP, X-Admin-Recovery',
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
     'Access-Control-Max-Age': '86400',
     'Access-Control-Expose-Headers': 'X-Correlation-Id',
@@ -449,6 +458,14 @@ function cleanText(value, maxLength, field, { required = true } = {}) {
   if (required && !text) throw new HttpError(400, `${field} is required`)
   if (text.length > maxLength) throw new HttpError(400, `${field} is too long`)
   return text
+}
+
+function safeCsvCell(value) {
+  let text = String(value ?? '')
+  // Spreadsheet programs evaluate these prefixes as formulas even when the
+  // CSV field is quoted. Prefix an apostrophe so exported user data is text.
+  if (/^[\s]*[=+\-@]/.test(text) || /^[\t\r]/.test(text)) text = `'${text}`
+  return `"${text.replace(/"/g, '""')}"`
 }
 
 function cleanRating(value) {
@@ -580,6 +597,8 @@ function productRowToConfig(row) {
     deliveryUrl: row.delivery_url || '',
     originalPrice: row.original_price || '',
     salePrice: row.sale_price || '',
+    priceCents: Math.max(0, Number(row.price_cents || 0)),
+    currency: /^[A-Z]{3}$/.test(String(row.currency || '').toUpperCase()) ? String(row.currency).toUpperCase() : 'USD',
     offerLabel: row.offer_label || '',
     offerActive: Boolean(row.offer_active),
     includes: parseStringList(row.includes),
@@ -601,8 +620,8 @@ async function ensureProductsSeeded(env) {
   const statements = SEED_PRODUCTS.map((product) => env.DB.prepare(`
     INSERT OR IGNORE INTO products (
       key, name, tagline, category, icon, accent, delivery_url,
-      original_price, sale_price, offer_label, offer_active, includes, active, featured, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, 1, ?, 1, ?, ?, ?, ?)
+      original_price, sale_price, price_cents, currency, offer_label, offer_active, includes, active, featured, sort_order, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, 'USD', ?, 1, ?, 1, ?, ?, ?, ?)
   `).bind(
     product.key,
     product.name,
@@ -612,6 +631,7 @@ async function ensureProductsSeeded(env) {
     product.accent,
     product.originalPrice,
     product.salePrice,
+    priceInCents(product.salePrice) || 0,
     product.offerLabel,
     JSON.stringify(product.includes),
     product.featured,
@@ -768,6 +788,8 @@ function cleanProductInput(input, { create = false } = {}) {
     deliveryUrl,
     originalPrice: cleanText(input.originalPrice, 32, 'Original price', { required: false }),
     salePrice: cleanText(input.salePrice, 32, 'Sale price', { required: false }),
+    priceCents: Math.max(0, Math.round(Number(input.priceCents) || priceInCents(input.salePrice) || 0)),
+    currency: String(input.currency || 'USD').trim().toUpperCase(),
     offerLabel: cleanText(input.offerLabel, 80, 'Offer label'),
     offerActive: Boolean(input.offerActive),
     active: Boolean(input.active),
@@ -775,6 +797,8 @@ function cleanProductInput(input, { create = false } = {}) {
     sortOrder: Math.min(999, Math.max(0, Number(input.sortOrder) || 0)),
     includes: cleanIncludes(input.includes),
   }
+  if (!/^[A-Z]{3}$/.test(product.currency)) throw new HttpError(400, 'Currency must be a three-letter ISO code')
+  if (product.priceCents > 100000000) throw new HttpError(400, 'Price is too large')
   // Media fields are only applied when explicitly present so a plain editor
   // save cannot wipe uploaded visuals.
   if (!create && Object.prototype.hasOwnProperty.call(input, 'heroImage')) {
@@ -796,6 +820,9 @@ function cleanProductInput(input, { create = false } = {}) {
     : (input.active === false ? 'hidden' : 'active')
   product.status = status
   product.active = status !== 'hidden'
+  if (status === 'active' && (!Number.isInteger(product.priceCents) || product.priceCents <= 0)) {
+    throw new HttpError(400, 'Active products require an authoritative checkout price in minor currency units')
+  }
 
   let waitlistConfig = {}
   if (input.waitlistConfig && typeof input.waitlistConfig === 'object') {
@@ -866,6 +893,7 @@ async function describeImageWithAi(env, bytes) {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(input),
+        signal: AbortSignal.timeout(10000),
       })
       if (response.ok) {
         const payload = await response.json()
@@ -998,8 +1026,8 @@ async function createProduct(env, input) {
   await env.DB.prepare(`
     INSERT INTO products (
       key, name, tagline, category, icon, accent, lemon_variant_id, delivery_url,
-      original_price, sale_price, offer_label, offer_active, includes, active, featured, sort_order, status, waitlist_config, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      original_price, sale_price, price_cents, currency, offer_label, offer_active, includes, active, featured, sort_order, status, waitlist_config, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     product.key,
     product.name,
@@ -1011,6 +1039,8 @@ async function createProduct(env, input) {
     product.deliveryUrl,
     product.originalPrice,
     product.salePrice,
+    product.priceCents,
+    product.currency,
     product.offerLabel,
     product.offerActive ? 1 : 0,
     JSON.stringify(product.includes),
@@ -1052,9 +1082,12 @@ async function duplicateProduct(env, sourceKey, input) {
     icon: input.icon || source.icon || 'spreadsheet',
     accent: input.accent || source.accent || 'lime',
     includes: input.includes?.length ? input.includes : parseStringList(source.includes),
-    // Never inherit payment or delivery wiring.
+    // Never inherit payment or delivery wiring, and never publish a duplicate
+    // as purchasable before its own checkout price/variant are configured.
     lemonVariantId: '',
     deliveryUrl: '',
+    status: 'coming_soon',
+    active: true,
   })
 
   const content = String(source.content || '')
@@ -1074,7 +1107,7 @@ async function updateProduct(env, key, input) {
   const result = await env.DB.prepare(`
     UPDATE products SET
       name = ?, tagline = ?, category = ?, icon = ?, accent = ?, lemon_variant_id = ?, delivery_url = ?,
-      original_price = ?, sale_price = ?, offer_label = ?, offer_active = ?, includes = ?,
+      original_price = ?, sale_price = ?, price_cents = ?, currency = ?, offer_label = ?, offer_active = ?, includes = ?,
       active = ?, featured = ?, sort_order = ?, status = ?, waitlist_config = ?, updated_at = ?
     WHERE key = ?
     RETURNING *
@@ -1088,6 +1121,8 @@ async function updateProduct(env, key, input) {
     product.deliveryUrl,
     product.originalPrice,
     product.salePrice,
+    product.priceCents,
+    product.currency,
     product.offerLabel,
     product.offerActive ? 1 : 0,
     JSON.stringify(product.includes),
@@ -1208,16 +1243,21 @@ async function cleanBundleInput(env, input, { create = false } = {}) {
 // usable price, so callers can hide it rather than sell it wrongly.
 function priceBundle(products, discountPercent) {
   let fullCents = 0
+  const currencies = new Set()
   for (const product of products) {
-    const cents = priceInCents(product.salePrice)
-    if (cents === null) return null
+    const cents = Math.round(Number(product.priceCents || 0))
+    if (!Number.isInteger(cents) || cents <= 0) return null
+    currencies.add(product.currency || 'USD')
     fullCents += cents
   }
+  if (currencies.size !== 1) return null
   const bundleCents = Math.round(fullCents * (100 - discountPercent) / 100)
-  return { fullCents, bundleCents, savingCents: fullCents - bundleCents }
+  return { fullCents, bundleCents, savingCents: fullCents - bundleCents, currency: [...currencies][0] }
 }
 
-const centsToDisplay = (cents) => `$${(cents / 100).toFixed(2).replace(/\.00$/, '')}`
+const centsToDisplay = (cents, currency = 'USD') => new Intl.NumberFormat('en-US', {
+  style: 'currency', currency, maximumFractionDigits: cents % 100 ? 2 : 0,
+}).format(cents / 100)
 
 async function bundlesForPublic(env) {
   await ensureProductsSeeded(env)
@@ -1250,9 +1290,9 @@ async function bundlesForPublic(env) {
       updatedAt: bundle.updatedAt,
       checkoutReady: members.every((product) => Boolean(product.lemonVariantId)),
       products: members.map((product) => ({ key: product.key, name: product.name, icon: product.icon, accent: product.accent, salePrice: product.salePrice })),
-      fullPrice: centsToDisplay(pricing.fullCents),
-      bundlePrice: centsToDisplay(pricing.bundleCents),
-      saving: centsToDisplay(pricing.savingCents),
+      fullPrice: centsToDisplay(pricing.fullCents, pricing.currency),
+      bundlePrice: centsToDisplay(pricing.bundleCents, pricing.currency),
+      saving: centsToDisplay(pricing.savingCents, pricing.currency),
     })
   }
   return bundles
@@ -1351,11 +1391,37 @@ async function deleteProduct(env, key) {
 
 const JSON_BODY_MAX_LENGTH = 8 * 1024 * 1024
 
+async function readBodyTextBounded(request, maxBytes = JSON_BODY_MAX_LENGTH, label = 'Request') {
+  const contentLength = Number(request.headers.get('Content-Length') || 0)
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) throw new HttpError(413, `${label} body is too large`)
+  if (!request.body) return ''
+
+  const reader = request.body.getReader()
+  const decoder = new TextDecoder()
+  let total = 0
+  let text = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel('body limit exceeded').catch(() => {})
+        throw new HttpError(413, `${label} body is too large`)
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+    text += decoder.decode()
+    return text
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 async function readJson(request) {
   const contentType = request.headers.get('Content-Type') || ''
   if (!contentType.includes('application/json')) throw new HttpError(415, 'Content-Type must be application/json')
-  const text = await request.text()
-  if (text.length > JSON_BODY_MAX_LENGTH) throw new HttpError(413, 'Request body is too large')
+  const text = await readBodyTextBounded(request)
   try {
     return JSON.parse(text)
   } catch {
@@ -1364,7 +1430,7 @@ async function readJson(request) {
 }
 
 async function sha256Hex(value) {
-  const data = new TextEncoder().encode(value)
+  const data = value instanceof Uint8Array ? value : new TextEncoder().encode(value)
   const digest = await crypto.subtle.digest('SHA-256', data)
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
@@ -1379,11 +1445,54 @@ function stringToBase64Url(value) {
   return bytesToBase64Url(new TextEncoder().encode(value))
 }
 
-function base64UrlToString(value) {
-  const normalized = value.replaceAll('-', '+').replaceAll('_', '/')
+function base64UrlToBytes(value) {
+  const normalized = String(value || '').replaceAll('-', '+').replaceAll('_', '/')
   const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
   const binary = atob(padded)
-  return new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)))
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0))
+}
+
+function base64UrlToString(value) {
+  return new TextDecoder().decode(base64UrlToBytes(value))
+}
+
+async function dataEncryptionKey(env, purpose) {
+  if (!env.TOTP_ENCRYPTION_KEY) throw new HttpError(503, 'Server-side encryption is not configured')
+  const material = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`runway:${purpose}:${env.TOTP_ENCRYPTION_KEY}`))
+  return crypto.subtle.importKey('raw', material, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'])
+}
+
+async function encryptSensitiveValue(env, purpose, value) {
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const key = await dataEncryptionKey(env, purpose)
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(String(value || '')))
+  return `v1.${bytesToBase64Url(iv)}.${bytesToBase64Url(new Uint8Array(ciphertext))}`
+}
+
+async function decryptSensitiveValue(env, purpose, sealed) {
+  const [version, encodedIv, encodedCiphertext, extra] = String(sealed || '').split('.')
+  if (version !== 'v1' || !encodedIv || !encodedCiphertext || extra) throw new Error('Invalid encrypted value')
+  const key = await dataEncryptionKey(env, purpose)
+  const plaintext = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: base64UrlToBytes(encodedIv) },
+    key,
+    base64UrlToBytes(encodedCiphertext),
+  )
+  return new TextDecoder().decode(plaintext)
+}
+
+async function readTotpSecret(env, storedSecret) {
+  const stored = String(storedSecret || '')
+  if (!stored.startsWith('v1.')) {
+    // Transparently seal legacy plaintext rows after the first successful
+    // owner-authentication read; the compare protects a concurrently reset row.
+    if (stored) {
+      const encrypted = await encryptSensitiveValue(env, 'admin-totp-secret', stored)
+      await env.DB.prepare('UPDATE admin_totp SET secret = ? WHERE id = 1 AND secret = ?').bind(encrypted, stored).run()
+    }
+    return stored
+  }
+  return decryptSensitiveValue(env, 'admin-totp-secret', stored)
 }
 
 async function feedbackSignature(env, encodedPayload) {
@@ -1432,6 +1541,569 @@ async function feedbackPurchaseForUser(env, token, userId) {
   return findPurchaseForUser(env, payload.purchaseId, userId)
 }
 
+// Runway Systems Blog publishing ------------------------------------------------
+function normalizeBlogSlug(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+function blogTagList(value) {
+  const source = Array.isArray(value) ? value : String(value || '').split(',')
+  const tags = [...new Set(source.map((tag) => String(tag || '').trim()).filter(Boolean))].slice(0, 8)
+  for (const tag of tags) if (tag.length > 32) throw new HttpError(400, 'Tags must be 32 characters or shorter')
+  return tags
+}
+
+function blogReadingMinutes(markdown) {
+  const words = String(markdown || '').replace(/[`#>*_\[\]()|~-]/g, ' ').split(/\s+/).filter(Boolean).length
+  return Math.max(1, Math.ceil(words / 220))
+}
+
+function cleanBlogDraft(input, current = null) {
+  const fallback = (camel, snake, empty = '') => input[camel] !== undefined ? input[camel] : (current?.[snake] ?? empty)
+  const title = cleanText(fallback('title', 'title', 'Untitled article'), 140, 'Title')
+  const slug = normalizeBlogSlug(fallback('slug', 'slug', title) || title)
+  if (!slug || slug.length > 110 || !BLOG_SLUG_PATTERN.test(slug)) throw new HttpError(400, 'Use a valid lowercase article slug')
+  const requestedLayout = fallback('layout', 'layout', 'editorial')
+  const layout = BLOG_LAYOUTS.includes(requestedLayout) ? requestedLayout : 'editorial'
+  const currentTags = String(current?.tag_names || '').split('\u001f').filter(Boolean)
+  return {
+    title,
+    slug,
+    excerpt: cleanText(fallback('excerpt', 'excerpt'), 360, 'Excerpt', { required: false }),
+    bodyMarkdown: cleanText(fallback('bodyMarkdown', 'body_markdown'), 120000, 'Article body', { required: false }),
+    categoryId: cleanText(fallback('categoryId', 'category_id'), 80, 'Category', { required: false }),
+    authorName: cleanText(fallback('authorName', 'author_name', 'Runway Systems'), 80, 'Author'),
+    coverMediaId: cleanText(fallback('coverMediaId', 'cover_media_id'), 80, 'Cover media', { required: false }),
+    seoTitle: cleanText(fallback('seoTitle', 'seo_title'), 75, 'SEO title', { required: false }),
+    seoDescription: cleanText(fallback('seoDescription', 'seo_description'), 180, 'SEO description', { required: false }),
+    featured: Boolean(fallback('featured', 'featured', false)),
+    layout,
+    tags: blogTagList(input.tags !== undefined ? input.tags : currentTags),
+  }
+}
+
+function blogRowToPost(row, { includeBody = false, owner = false } = {}) {
+  const tags = String(row.tag_names || '').split('\u001f').filter(Boolean)
+  const post = {
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    excerpt: row.excerpt || '',
+    status: row.status,
+    layout: row.layout || 'editorial',
+    category: row.category_id ? { id: row.category_id, slug: row.category_slug || '', name: row.category_name || '' } : null,
+    tags,
+    authorName: row.author_name || 'Runway Systems',
+    cover: row.cover_media_id ? {
+      id: row.cover_media_id,
+      path: row.cover_public_path || '',
+      altText: row.cover_alt_text || '',
+      caption: row.cover_caption || '',
+      width: Number(row.cover_width || 0),
+      height: Number(row.cover_height || 0),
+    } : null,
+    seoTitle: row.seo_title || '',
+    seoDescription: row.seo_description || '',
+    featured: Boolean(row.featured),
+    scheduledAt: row.scheduled_at || '',
+    firstPublishedAt: row.first_published_at || '',
+    publishedAt: row.published_at || '',
+    version: Number(row.version || 1),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    readingMinutes: blogReadingMinutes(row.body_markdown),
+  }
+  if (includeBody) post.bodyMarkdown = row.body_markdown || ''
+  if (owner) post.deletedAt = row.deleted_at || ''
+  return post
+}
+
+const BLOG_SELECT = `
+  SELECT p.*, c.slug AS category_slug, c.name AS category_name,
+         m.public_path AS cover_public_path, m.alt_text AS cover_alt_text,
+         m.caption AS cover_caption, m.width AS cover_width, m.height AS cover_height,
+         COALESCE(GROUP_CONCAT(t.name, char(31)), '') AS tag_names
+  FROM blog_posts p
+  LEFT JOIN blog_categories c ON c.id = p.category_id
+  LEFT JOIN blog_media m ON m.id = p.cover_media_id AND m.status = 'ready'
+  LEFT JOIN blog_post_tags pt ON pt.post_id = p.id
+  LEFT JOIN blog_tags t ON t.id = pt.tag_id
+`
+
+async function blogPostById(env, id, { includeBody = true, includeDeleted = true } = {}) {
+  const row = await env.DB.prepare(`${BLOG_SELECT} WHERE p.id = ? ${includeDeleted ? '' : 'AND p.deleted_at IS NULL'} GROUP BY p.id`).bind(id).first()
+  if (!row) throw new HttpError(404, 'Article not found')
+  return { row, post: blogRowToPost(row, { includeBody, owner: true }) }
+}
+
+async function blogCategoryExists(env, id) {
+  if (!id) return true
+  const row = await env.DB.prepare('SELECT id FROM blog_categories WHERE id = ? AND active = 1').bind(id).first()
+  return Boolean(row)
+}
+
+async function blogMediaById(env, id, { ready = true } = {}) {
+  if (!id) return null
+  const row = await env.DB.prepare(`SELECT * FROM blog_media WHERE id = ? ${ready ? "AND status = 'ready' AND deleted_at IS NULL" : ''}`).bind(id).first()
+  if (!row) throw new HttpError(400, 'Selected media is unavailable')
+  return row
+}
+
+function inlineBlogMediaIds(markdown) {
+  return [...new Set([...String(markdown || '').matchAll(/\/blog-media\/([a-f0-9-]{36})\/[a-f0-9]{8}\.(?:png|jpe?g|webp)/g)].map((match) => match[1]))]
+}
+
+async function validateBlogReferences(env, draft) {
+  const markdownImages = [...String(draft.bodyMarkdown || '').matchAll(/!\[([^\]]*)\]\(\s*<?([^\s)>]+)>?(?:\s+["'][^)]*["'])?\s*\)/g)].map((match) => ({ alt: match[1].trim(), path: match[2] }))
+  if (markdownImages.some((image) => !/^\/blog-media\/[a-f0-9-]{36}\/[a-f0-9]{8}\.(?:png|jpe?g|webp)$/i.test(image.path))) {
+    throw new HttpError(400, 'Article images must come from the Blog media library')
+  }
+  if (markdownImages.some((image) => !image.alt)) throw new HttpError(400, 'Every inline image needs descriptive alt text')
+  if (!(await blogCategoryExists(env, draft.categoryId))) throw new HttpError(400, 'Choose an active category')
+  if (draft.coverMediaId) {
+    const cover = await blogMediaById(env, draft.coverMediaId)
+    if (!String(cover.alt_text || '').trim()) throw new HttpError(400, 'Cover image alt text is required')
+  }
+  const inlineIds = inlineBlogMediaIds(draft.bodyMarkdown)
+  for (const id of inlineIds) {
+    const media = await blogMediaById(env, id)
+    if (!String(media.alt_text || '').trim()) throw new HttpError(400, 'Every inline image needs alt text')
+  }
+  return inlineIds
+}
+
+function validatePublishableBlog(draft) {
+  if (draft.title.length < 8) throw new HttpError(400, 'Published titles must be at least 8 characters')
+  if (draft.excerpt.length < 40) throw new HttpError(400, 'Add an excerpt of at least 40 characters')
+  if (draft.bodyMarkdown.length < 150) throw new HttpError(400, 'Add a complete article before publishing')
+  if (!draft.categoryId) throw new HttpError(400, 'Choose a category before publishing')
+}
+
+async function replaceBlogTagsAndMedia(env, postId, draft, inlineIds, at) {
+  const statements = [
+    env.DB.prepare('DELETE FROM blog_post_tags WHERE post_id = ?').bind(postId),
+    env.DB.prepare('DELETE FROM blog_post_media WHERE post_id = ?').bind(postId),
+  ]
+  for (const name of draft.tags) {
+    const slug = normalizeBlogSlug(name)
+    if (!slug) continue
+    const id = `blog-tag-${(await sha256Hex(slug)).slice(0, 24)}`
+    statements.push(env.DB.prepare('INSERT OR IGNORE INTO blog_tags (id, slug, name, created_at) VALUES (?, ?, ?, ?)').bind(id, slug, name, at))
+    statements.push(env.DB.prepare('INSERT OR IGNORE INTO blog_post_tags (post_id, tag_id) VALUES (?, ?)').bind(postId, id))
+  }
+  if (draft.coverMediaId) statements.push(env.DB.prepare("INSERT INTO blog_post_media (post_id, media_id, role, created_at) VALUES (?, ?, 'cover', ?)").bind(postId, draft.coverMediaId, at))
+  for (const mediaId of inlineIds) statements.push(env.DB.prepare("INSERT OR IGNORE INTO blog_post_media (post_id, media_id, role, created_at) VALUES (?, ?, 'inline', ?)").bind(postId, mediaId, at))
+  await env.DB.batch(statements)
+}
+
+async function createBlogDraft(env, owner, input) {
+  const draft = cleanBlogDraft(input)
+  if (!(await blogCategoryExists(env, draft.categoryId))) throw new HttpError(400, 'Choose an active category')
+  const duplicate = await env.DB.prepare('SELECT id FROM blog_posts WHERE slug = ? OR id IN (SELECT post_id FROM blog_slug_redirects WHERE old_slug = ?)').bind(draft.slug, draft.slug).first()
+  if (duplicate) throw new HttpError(409, 'That article URL is already reserved')
+  const inlineIds = await validateBlogReferences(env, draft)
+  const id = crypto.randomUUID()
+  const at = nowIso()
+  await env.DB.prepare(`
+    INSERT INTO blog_posts (id, slug, title, excerpt, body_markdown, status, layout, category_id, author_name,
+      cover_media_id, seo_title, seo_description, featured, version, created_by_user_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'draft', ?, NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, ?, 1, ?, ?, ?)
+  `).bind(id, draft.slug, draft.title, draft.excerpt, draft.bodyMarkdown, draft.layout, draft.categoryId,
+    draft.authorName, draft.coverMediaId, draft.seoTitle, draft.seoDescription, draft.featured ? 1 : 0,
+    owner.id, at, at).run()
+  await replaceBlogTagsAndMedia(env, id, draft, inlineIds, at)
+  return (await blogPostById(env, id)).post
+}
+
+async function updateBlogDraft(env, id, input) {
+  const { row } = await blogPostById(env, id)
+  if (row.deleted_at) throw new HttpError(409, 'Restore this article before editing it')
+  const expectedVersion = Number(input.version)
+  if (!Number.isInteger(expectedVersion) || expectedVersion !== Number(row.version)) throw new HttpError(409, 'This article changed in another tab. Reload before saving.')
+  const draft = cleanBlogDraft(input, row)
+  if (row.first_published_at && draft.slug !== row.slug) throw new HttpError(409, 'Use Change URL to preserve a redirect for a published article')
+  const duplicate = await env.DB.prepare('SELECT id FROM blog_posts WHERE slug = ? AND id != ?').bind(draft.slug, id).first()
+  if (duplicate) throw new HttpError(409, 'That article URL is already in use')
+  const inlineIds = await validateBlogReferences(env, draft)
+  const at = nowIso()
+  if (row.status === 'published') await createBlogRevision(env, row, 'published-update', row.created_by_user_id)
+  const result = await env.DB.prepare(`
+    UPDATE blog_posts SET slug = ?, title = ?, excerpt = ?, body_markdown = ?, layout = ?, category_id = NULLIF(?, ''),
+      author_name = ?, cover_media_id = NULLIF(?, ''), seo_title = ?, seo_description = ?, featured = ?,
+      version = version + 1, updated_at = ? WHERE id = ? AND version = ?
+  `).bind(draft.slug, draft.title, draft.excerpt, draft.bodyMarkdown, draft.layout, draft.categoryId,
+    draft.authorName, draft.coverMediaId, draft.seoTitle, draft.seoDescription, draft.featured ? 1 : 0,
+    at, id, expectedVersion).run()
+  if (!Number(result.meta?.changes || 0)) throw new HttpError(409, 'This article changed in another tab. Reload before saving.')
+  await replaceBlogTagsAndMedia(env, id, draft, inlineIds, at)
+  if (row.status === 'published') await enqueueBlogEvent(env, id, expectedVersion + 1, 'published-update')
+  return (await blogPostById(env, id)).post
+}
+
+function blogSnapshot(row) {
+  const keys = ['slug', 'title', 'excerpt', 'body_markdown', 'status', 'layout', 'category_id', 'author_name', 'cover_media_id',
+    'seo_title', 'seo_description', 'featured', 'scheduled_at', 'first_published_at', 'published_at', 'tag_names', 'version']
+  return Object.fromEntries(keys.map((key) => [key, row[key] ?? null]))
+}
+
+async function createBlogRevision(env, row, reason, ownerId) {
+  await env.DB.prepare(`INSERT OR IGNORE INTO blog_post_revisions
+    (id, post_id, version, reason, snapshot_json, created_by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .bind(crypto.randomUUID(), row.id, Number(row.version), reason, JSON.stringify(blogSnapshot(row)), ownerId || 'system', nowIso()).run()
+}
+
+async function enqueueBlogEvent(env, postId, version, eventType) {
+  const at = nowIso()
+  const id = crypto.randomUUID()
+  await env.DB.prepare(`INSERT INTO blog_publication_outbox
+    (id, post_id, post_version, event_type, attempts, last_error, created_at, next_attempt_at)
+    VALUES (?, ?, ?, ?, 0, '', ?, ?)`)
+    .bind(id, postId || null, Number(version || 0), eventType, at, at).run()
+  try {
+    await invalidatePublicCaches()
+    await env.DB.prepare('UPDATE blog_publication_outbox SET processed_at = ?, attempts = 1 WHERE id = ?').bind(nowIso(), id).run()
+  } catch {
+    // The durable outbox keeps the event pending for the scheduled retry.
+  }
+}
+
+async function transitionBlogPost(env, id, action, input, owner) {
+  const { row } = await blogPostById(env, id)
+  const expectedVersion = Number(input.version)
+  if (!Number.isInteger(expectedVersion) || expectedVersion !== Number(row.version)) throw new HttpError(409, 'This article changed. Reload before continuing.')
+  const at = nowIso()
+  await createBlogRevision(env, row, action, owner?.id || 'system')
+  let sql = ''
+  let bindings = []
+  if (action === 'publish') {
+    const draft = cleanBlogDraft({
+      ...blogRowToPost(row, { includeBody: true, owner: true }),
+      bodyMarkdown: row.body_markdown,
+      categoryId: row.category_id || '', coverMediaId: row.cover_media_id || '',
+      tags: String(row.tag_names || '').split('\u001f').filter(Boolean),
+    }, row)
+    validatePublishableBlog(draft)
+    await validateBlogReferences(env, draft)
+    sql = "status = 'published', published_at = ?, first_published_at = COALESCE(first_published_at, ?), scheduled_at = NULL, deleted_at = NULL"
+    bindings = [at, at]
+  } else if (action === 'schedule') {
+    const due = Date.parse(String(input.scheduledAt || ''))
+    if (!Number.isFinite(due) || due <= Date.now()) throw new HttpError(400, 'Choose a future publication time')
+    const draft = cleanBlogDraft({
+      ...blogRowToPost(row, { includeBody: true, owner: true }), bodyMarkdown: row.body_markdown,
+      categoryId: row.category_id || '', coverMediaId: row.cover_media_id || '',
+      tags: String(row.tag_names || '').split('\u001f').filter(Boolean),
+    }, row)
+    validatePublishableBlog(draft)
+    await validateBlogReferences(env, draft)
+    sql = "status = 'scheduled', scheduled_at = ?, deleted_at = NULL"
+    bindings = [new Date(due).toISOString()]
+  } else if (action === 'unpublish' || action === 'cancel-schedule') {
+    sql = "status = 'draft', scheduled_at = NULL"
+  } else if (action === 'archive') {
+    sql = "status = 'archived', scheduled_at = NULL"
+  } else if (action === 'restore') {
+    sql = "status = 'draft', scheduled_at = NULL, deleted_at = NULL"
+  } else if (action === 'trash') {
+    sql = "status = 'archived', scheduled_at = NULL, deleted_at = ?"
+    bindings = [at]
+  } else {
+    throw new HttpError(400, 'Unsupported article action')
+  }
+  const result = await env.DB.prepare(`UPDATE blog_posts SET ${sql}, version = version + 1, updated_at = ? WHERE id = ? AND version = ?`)
+    .bind(...bindings, at, id, expectedVersion).run()
+  if (!Number(result.meta?.changes || 0)) throw new HttpError(409, 'This article changed. Reload before continuing.')
+  await enqueueBlogEvent(env, id, expectedVersion + 1, action)
+  return (await blogPostById(env, id)).post
+}
+
+async function changeBlogSlug(env, id, input, owner) {
+  const { row } = await blogPostById(env, id)
+  const expectedVersion = Number(input.version)
+  if (expectedVersion !== Number(row.version)) throw new HttpError(409, 'This article changed. Reload before continuing.')
+  const slug = normalizeBlogSlug(input.slug)
+  if (!slug || !BLOG_SLUG_PATTERN.test(slug) || slug.length > 110) throw new HttpError(400, 'Use a valid article URL')
+  if (slug === row.slug) return blogRowToPost(row, { includeBody: true, owner: true })
+  const collision = await env.DB.prepare('SELECT id FROM blog_posts WHERE slug = ? UNION SELECT post_id AS id FROM blog_slug_redirects WHERE old_slug = ?').bind(slug, slug).first()
+  if (collision) throw new HttpError(409, 'That article URL is already reserved')
+  const at = nowIso()
+  await createBlogRevision(env, row, 'change-slug', owner.id)
+  const results = await env.DB.batch([
+    env.DB.prepare('INSERT OR REPLACE INTO blog_slug_redirects (old_slug, post_id, created_by_user_id, reason, created_at) VALUES (?, ?, ?, ?, ?)').bind(row.slug, id, owner.id, cleanText(input.reason || '', 180, 'Reason', { required: false }), at),
+    env.DB.prepare('UPDATE blog_posts SET slug = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?').bind(slug, at, id, expectedVersion),
+  ])
+  if (!Number(results[1]?.meta?.changes || 0)) {
+    await env.DB.prepare('DELETE FROM blog_slug_redirects WHERE old_slug = ? AND post_id = ? AND created_at = ?').bind(row.slug, id, at).run()
+    throw new HttpError(409, 'This article changed. Reload before continuing.')
+  }
+  await enqueueBlogEvent(env, id, expectedVersion + 1, 'change-slug')
+  return (await blogPostById(env, id)).post
+}
+
+async function restoreBlogRevision(env, id, revisionId, input, owner) {
+  const { row } = await blogPostById(env, id)
+  if (Number(input.version) !== Number(row.version)) throw new HttpError(409, 'This article changed. Reload before restoring.')
+  const revision = await env.DB.prepare('SELECT * FROM blog_post_revisions WHERE id = ? AND post_id = ?').bind(revisionId, id).first()
+  if (!revision) throw new HttpError(404, 'Revision not found')
+  const snapshot = parseJsonSafe(revision.snapshot_json, null)
+  if (!snapshot) throw new HttpError(500, 'Revision data is unavailable')
+  const restoredDraft = cleanBlogDraft({
+    title: snapshot.title, slug: row.slug, excerpt: snapshot.excerpt, bodyMarkdown: snapshot.body_markdown,
+    layout: snapshot.layout, categoryId: snapshot.category_id || '', authorName: snapshot.author_name,
+    coverMediaId: snapshot.cover_media_id || '', seoTitle: snapshot.seo_title, seoDescription: snapshot.seo_description,
+    featured: Boolean(snapshot.featured), tags: String(snapshot.tag_names ?? row.tag_names ?? '').split('\u001f').filter(Boolean),
+  }, row)
+  const inlineIds = await validateBlogReferences(env, restoredDraft)
+  await createBlogRevision(env, row, 'before-restore', owner.id)
+  const at = nowIso()
+  const result = await env.DB.prepare(`UPDATE blog_posts SET title = ?, excerpt = ?, body_markdown = ?, layout = ?, category_id = NULLIF(?, ''),
+    author_name = ?, cover_media_id = NULLIF(?, ''), seo_title = ?, seo_description = ?, featured = ?, version = version + 1,
+    updated_at = ? WHERE id = ? AND version = ?`).bind(restoredDraft.title, restoredDraft.excerpt, restoredDraft.bodyMarkdown,
+    restoredDraft.layout, restoredDraft.categoryId, restoredDraft.authorName, restoredDraft.coverMediaId,
+    restoredDraft.seoTitle, restoredDraft.seoDescription, restoredDraft.featured ? 1 : 0, at, id, Number(row.version)).run()
+  if (!Number(result.meta?.changes || 0)) throw new HttpError(409, 'This article changed. Reload before restoring.')
+  await replaceBlogTagsAndMedia(env, id, restoredDraft, inlineIds, at)
+  await enqueueBlogEvent(env, id, Number(row.version) + 1, 'revision-restore')
+  return (await blogPostById(env, id)).post
+}
+
+async function listPublicBlogPosts(env, { limit = 12, cursor = '', category = '', tag = '', search = '' } = {}) {
+  const safeLimit = Math.min(24, Math.max(1, Number(limit) || 12))
+  const params = [nowIso()]
+  let extra = ''
+  if (cursor) {
+    const parsed = /^([01])\|(.+)$/.exec(cursor)
+    if (parsed) {
+      const cursorFeatured = Number(parsed[1]); const cursorPublishedAt = parsed[2]
+      extra += ' AND (p.featured < ? OR (p.featured = ? AND p.published_at < ?))'
+      params.push(cursorFeatured, cursorFeatured, cursorPublishedAt)
+    } else { extra += ' AND p.published_at < ?'; params.push(cursor) }
+  }
+  if (category) { extra += ' AND c.slug = ?'; params.push(category) }
+  if (tag) { extra += ' AND EXISTS (SELECT 1 FROM blog_post_tags xpt JOIN blog_tags xt ON xt.id = xpt.tag_id WHERE xpt.post_id = p.id AND xt.slug = ?)'; params.push(tag) }
+  if (search) { extra += ' AND (LOWER(p.title) LIKE ? OR LOWER(p.excerpt) LIKE ?)'; const q = `%${search.toLowerCase()}%`; params.push(q, q) }
+  params.push(safeLimit + 1)
+  const rows = await env.DB.prepare(`${BLOG_SELECT} WHERE ${BLOG_PUBLIC_WHERE} ${extra} GROUP BY p.id ORDER BY p.featured DESC, p.published_at DESC LIMIT ?`).bind(...params).all()
+  const all = rows.results || []
+  const hasMore = all.length > safeLimit
+  const page = all.slice(0, safeLimit)
+  return { posts: page.map((row) => blogRowToPost(row)), hasMore, nextCursor: hasMore && page.length ? `${Number(page.at(-1).featured || 0)}|${page.at(-1).published_at}` : '' }
+}
+
+async function getPublicBlogPost(env, slug) {
+  if (!BLOG_SLUG_PATTERN.test(slug)) throw new HttpError(404, 'Article not found')
+  const row = await env.DB.prepare(`${BLOG_SELECT} WHERE p.slug = ? AND ${BLOG_PUBLIC_WHERE} GROUP BY p.id`).bind(slug, nowIso()).first()
+  if (!row) {
+    const redirect = await env.DB.prepare(`SELECT p.slug FROM blog_slug_redirects r JOIN blog_posts p ON p.id = r.post_id
+      WHERE r.old_slug = ? AND p.status = 'published' AND p.published_at <= ? AND p.deleted_at IS NULL`).bind(slug, nowIso()).first()
+    if (redirect) return { redirectTo: `/blog/${redirect.slug}` }
+    throw new HttpError(404, 'Article not found')
+  }
+  const relatedRows = await env.DB.prepare(`${BLOG_SELECT} WHERE ${BLOG_PUBLIC_WHERE} AND p.id != ?
+    GROUP BY p.id ORDER BY CASE WHEN p.category_id = ? THEN 0 ELSE 1 END, p.published_at DESC LIMIT 3`)
+    .bind(nowIso(), row.id, row.category_id || '').all()
+  return { post: blogRowToPost(row, { includeBody: true }), relatedPosts: (relatedRows.results || []).map((item) => blogRowToPost(item)) }
+}
+
+async function listBlogCategories(env, { owner = false } = {}) {
+  const rows = await env.DB.prepare(`SELECT c.*, COUNT(p.id) AS published_count FROM blog_categories c
+    LEFT JOIN blog_posts p ON p.category_id = c.id AND p.status = 'published' AND p.published_at <= ? AND p.deleted_at IS NULL
+    ${owner ? '' : 'WHERE c.active = 1'} GROUP BY c.id ORDER BY c.sort_order, c.name`).bind(nowIso()).all()
+  return (rows.results || []).map((row) => ({ id: row.id, slug: row.slug, name: row.name, description: row.description || '', active: Boolean(row.active), publishedCount: Number(row.published_count || 0) }))
+}
+
+async function listAdminBlogPosts(env, { status = '', search = '', trashed = false } = {}) {
+  const params = []
+  let where = trashed ? 'WHERE p.deleted_at IS NOT NULL' : 'WHERE p.deleted_at IS NULL'
+  if (status) { where += ' AND p.status = ?'; params.push(status) }
+  if (search) { where += ' AND (LOWER(p.title) LIKE ? OR LOWER(p.slug) LIKE ?)'; const q = `%${search.toLowerCase()}%`; params.push(q, q) }
+  const rows = await env.DB.prepare(`${BLOG_SELECT} ${where} GROUP BY p.id ORDER BY p.updated_at DESC LIMIT 200`).bind(...params).all()
+  return (rows.results || []).map((row) => blogRowToPost(row, { owner: true }))
+}
+
+function blogMediaDimensions(bytes, type) {
+  if (type === 'image/png' && bytes.length >= 24) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    return { width: view.getUint32(16), height: view.getUint32(20) }
+  }
+  if (type === 'image/jpeg') {
+    let offset = 2
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xff) { offset += 1; continue }
+      const marker = bytes[offset + 1]
+      const length = (bytes[offset + 2] << 8) + bytes[offset + 3]
+      if (marker >= 0xc0 && marker <= 0xc3) return { height: (bytes[offset + 5] << 8) + bytes[offset + 6], width: (bytes[offset + 7] << 8) + bytes[offset + 8] }
+      if (length < 2) break
+      offset += length + 2
+    }
+  }
+  if (type === 'image/webp' && bytes.length >= 30) {
+    const kind = String.fromCharCode(...bytes.slice(12, 16))
+    if (kind === 'VP8X') return { width: 1 + bytes[24] + (bytes[25] << 8) + (bytes[26] << 16), height: 1 + bytes[27] + (bytes[28] << 8) + (bytes[29] << 16) }
+    if (kind === 'VP8 ' && bytes.length >= 30) return { width: (bytes[26] | (bytes[27] << 8)) & 0x3fff, height: (bytes[28] | (bytes[29] << 8)) & 0x3fff }
+    if (kind === 'VP8L' && bytes.length >= 25) {
+      const bits = bytes[21] | (bytes[22] << 8) | (bytes[23] << 16) | (bytes[24] << 24)
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 }
+    }
+  }
+  throw new HttpError(400, 'Image dimensions could not be verified')
+}
+
+function blogMediaFromRow(row) {
+  return {
+    id: row.id, path: row.public_path, mimeType: row.mime_type, byteSize: Number(row.byte_size),
+    width: Number(row.width), height: Number(row.height), altText: row.alt_text || '', caption: row.caption || '',
+    originalName: row.original_name || '', status: row.status, usageCount: Number(row.usage_count || 0),
+    createdAt: row.created_at, updatedAt: row.updated_at,
+  }
+}
+
+async function uploadBlogMedia(env, owner, input) {
+  if (!env.MEDIA) throw new HttpError(503, 'Media storage is not configured')
+  const image = cleanText(input.image, 7000000, 'Image')
+  const { bytes, contentType } = decodeUploadedImage(image)
+  const { width, height } = blogMediaDimensions(bytes, contentType)
+  if (width > 6000 || height > 6000 || width * height > 30000000) throw new HttpError(400, 'Image dimensions are too large')
+  const hash = await sha256Hex(bytes)
+  const duplicate = await env.DB.prepare("SELECT *, 0 AS usage_count FROM blog_media WHERE sha256 = ? AND status = 'ready' AND deleted_at IS NULL").bind(hash).first()
+  if (duplicate) return { media: blogMediaFromRow(duplicate), duplicate: true }
+  const id = crypto.randomUUID()
+  const ext = contentType === 'image/png' ? 'png' : contentType === 'image/jpeg' ? 'jpg' : 'webp'
+  const key = `blog-media/${id}/${hash.slice(0, 8)}.${ext}`
+  const path = `/blog-media/${id}/${hash.slice(0, 8)}.${ext}`
+  await env.MEDIA.put(key, bytes, { httpMetadata: { contentType, cacheControl: 'public, max-age=31536000, immutable' } })
+  const at = nowIso()
+  await env.DB.prepare(`INSERT INTO blog_media (id, r2_key, public_path, mime_type, byte_size, width, height, sha256,
+    alt_text, caption, original_name, status, created_by_user_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?)`)
+    .bind(id, key, path, contentType, bytes.byteLength, width, height, hash,
+      cleanText(input.altText || '', 220, 'Alt text', { required: false }), cleanText(input.caption || '', 320, 'Caption', { required: false }),
+      cleanText(input.originalName || '', 180, 'Filename', { required: false }), owner.id, at, at).run()
+  const row = await env.DB.prepare('SELECT *, 0 AS usage_count FROM blog_media WHERE id = ?').bind(id).first()
+  return { media: blogMediaFromRow(row), duplicate: false }
+}
+
+async function listBlogMedia(env) {
+  const result = await env.DB.prepare(`SELECT m.*, COUNT(pm.post_id) AS usage_count FROM blog_media m
+    LEFT JOIN blog_post_media pm ON pm.media_id = m.id WHERE m.status != 'trashed'
+    GROUP BY m.id ORDER BY m.created_at DESC LIMIT 250`).all()
+  return (result.results || []).map(blogMediaFromRow)
+}
+
+async function updateBlogMedia(env, id, input) {
+  const row = await env.DB.prepare("SELECT * FROM blog_media WHERE id = ? AND status != 'trashed'").bind(id).first()
+  if (!row) throw new HttpError(404, 'Media not found')
+  const at = nowIso()
+  await env.DB.prepare('UPDATE blog_media SET alt_text = ?, caption = ?, updated_at = ? WHERE id = ?')
+    .bind(cleanText(input.altText || '', 220, 'Alt text', { required: false }), cleanText(input.caption || '', 320, 'Caption', { required: false }), at, id).run()
+  return blogMediaFromRow({ ...row, alt_text: input.altText || '', caption: input.caption || '', updated_at: at, usage_count: 0 })
+}
+
+async function trashBlogMedia(env, id) {
+  const usage = await env.DB.prepare('SELECT COUNT(*) AS total FROM blog_post_media WHERE media_id = ?').bind(id).first()
+  if (Number(usage?.total || 0)) throw new HttpError(409, 'This image is used by an article')
+  const at = nowIso()
+  const result = await env.DB.prepare("UPDATE blog_media SET status = 'trashed', deleted_at = ?, updated_at = ? WHERE id = ? AND status != 'trashed'").bind(at, at, id).run()
+  if (!Number(result.meta?.changes || 0)) throw new HttpError(404, 'Media not found')
+  return { removed: true, id }
+}
+
+function importHtmlAsMarkdown(value) {
+  return String(value || '')
+    .replace(/<(script|style|iframe|form|object|embed)[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '# $1\n\n').replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '## $1\n\n')
+    .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '### $1\n\n').replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n')
+    .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n\n').replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"')
+    .replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function sanitizeImportedMarkdown(value) {
+  return String(value || '')
+    .replace(/<(script|style|iframe|form|object|embed)[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/!\[([^\]]*)\]\(\s*<?([^\s)>]+)>?(?:\s+["'][^)]*["'])?\s*\)/g, (full, alt, path) => (
+      /^\/blog-media\/[a-f0-9-]{36}\/[a-f0-9]{8}\.(?:png|jpe?g|webp)$/i.test(path) ? full : `> Image omitted during safe import: ${String(alt || 'remote image').trim()}`
+    ))
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{3,}/g, '\n\n').trim()
+}
+
+async function importBlogDraft(env, owner, input) {
+  const format = ['markdown', 'text', 'html'].includes(input.format) ? input.format : 'text'
+  const source = cleanText(input.content, 120000, 'Imported content')
+  const bodyMarkdown = sanitizeImportedMarkdown(format === 'html' ? importHtmlAsMarkdown(source) : source)
+  const title = cleanText(input.title || bodyMarkdown.match(/^#\s+(.+)$/m)?.[1] || 'Imported article', 140, 'Title')
+  return createBlogDraft(env, owner, { title, slug: input.slug || title, bodyMarkdown: bodyMarkdown.replace(/^#\s+.+$/m, '').trim(), layout: input.layout || 'editorial' })
+}
+
+async function processScheduledBlogPosts(env) {
+  if (!env.DB) return 0
+  const due = await env.DB.prepare("SELECT * FROM blog_posts WHERE status = 'scheduled' AND scheduled_at <= ? AND deleted_at IS NULL LIMIT 50").bind(nowIso()).all()
+  let published = 0
+  for (const row of due.results || []) {
+    try {
+      await createBlogRevision(env, row, 'scheduled-publish', 'system')
+      const at = nowIso()
+      const result = await env.DB.prepare(`UPDATE blog_posts SET status = 'published', published_at = ?,
+        first_published_at = COALESCE(first_published_at, ?), scheduled_at = NULL, version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ? AND status = 'scheduled'`).bind(at, at, at, row.id, row.version).run()
+      if (Number(result.meta?.changes || 0)) { published += 1; await enqueueBlogEvent(env, row.id, Number(row.version) + 1, 'scheduled-publish') }
+    } catch (error) {
+      logEvent('warn', 'blog_schedule_publish_failed', { postId: row.id, error: error?.message })
+    }
+  }
+  return published
+}
+
+async function processBlogOutbox(env) {
+  const events = await env.DB.prepare(`SELECT * FROM blog_publication_outbox WHERE processed_at IS NULL AND next_attempt_at <= ? ORDER BY created_at LIMIT 50`).bind(nowIso()).all()
+  if (!(events.results || []).length) return 0
+  try {
+    await invalidatePublicCaches()
+    const at = nowIso()
+    await env.DB.batch(events.results.map((event) => env.DB.prepare('UPDATE blog_publication_outbox SET processed_at = ?, attempts = attempts + 1 WHERE id = ?').bind(at, event.id)))
+    return events.results.length
+  } catch (error) {
+    const next = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+    await env.DB.batch(events.results.map((event) => env.DB.prepare('UPDATE blog_publication_outbox SET attempts = attempts + 1, last_error = ?, next_attempt_at = ? WHERE id = ?').bind(String(error?.message || 'cache invalidation failed').slice(0, 300), next, event.id)))
+    return 0
+  }
+}
+
+async function cleanupBlogTrash(env) {
+  const cutoff = new Date(Date.now() - BLOG_TRASH_RETENTION_DAYS * 86400000).toISOString()
+  const posts = await env.DB.prepare('SELECT id FROM blog_posts WHERE deleted_at IS NOT NULL AND deleted_at < ? LIMIT 50').bind(cutoff).all()
+  if ((posts.results || []).length) {
+    await env.DB.batch(posts.results.map((post) => env.DB.prepare('DELETE FROM blog_posts WHERE id = ? AND deleted_at < ?').bind(post.id, cutoff)))
+    await enqueueBlogEvent(env, null, 0, 'trash-retention-cleanup')
+  }
+  const media = await env.DB.prepare("SELECT * FROM blog_media WHERE status = 'trashed' AND deleted_at < ? LIMIT 50").bind(cutoff).all()
+  for (const row of media.results || []) {
+    if (env.MEDIA) await env.MEDIA.delete(row.r2_key).catch(() => {})
+    await env.DB.prepare('DELETE FROM blog_media WHERE id = ?').bind(row.id).run().catch(() => {})
+  }
+}
+
+async function blogSitemapRows(env) {
+  const result = await env.DB.prepare("SELECT slug, updated_at FROM blog_posts WHERE status = 'published' AND published_at <= ? AND deleted_at IS NULL ORDER BY published_at DESC LIMIT 49000").bind(nowIso()).all()
+  return result.results || []
+}
+
+async function blogRssXml(env) {
+  const origin = getPrimaryOrigin(env)
+  const rows = await env.DB.prepare(`${BLOG_SELECT} WHERE ${BLOG_PUBLIC_WHERE} GROUP BY p.id ORDER BY p.published_at DESC LIMIT 50`).bind(nowIso()).all()
+  const xml = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
+  const items = (rows.results || []).map((row) => `<item><title>${xml(row.title)}</title><link>${xml(`${origin}/blog/${row.slug}`)}</link><guid isPermaLink="true">${xml(`${origin}/blog/${row.slug}`)}</guid><description>${xml(row.excerpt)}</description><pubDate>${new Date(row.published_at).toUTCString()}</pubDate>${row.category_name ? `<category>${xml(row.category_name)}</category>` : ''}</item>`).join('')
+  return `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Runway Systems Blog</title><link>${origin}/blog</link><description>Practical systems for calmer independent businesses.</description><language>en</language><atom:link href="${origin}/blog/feed.xml" rel="self" type="application/rss+xml"/>${items}</channel></rss>`
+}
+
+async function blogLlmsText(env, { full = false } = {}) {
+  const origin = getPrimaryOrigin(env)
+  const limit = full ? 1000 : 20
+  const rows = await env.DB.prepare("SELECT slug, title, excerpt FROM blog_posts WHERE status = 'published' AND published_at <= ? AND deleted_at IS NULL ORDER BY featured DESC, published_at DESC LIMIT ?").bind(nowIso(), limit).all()
+  return [`# Runway Systems Blog`, '', '> Practical guidance on finance, clients, projects, invoicing, and calmer business operations.', '', `- Blog: ${origin}/blog`, `- RSS: ${origin}/blog/feed.xml`, `- Sitemap: ${origin}/sitemap.xml`, '', '## Published articles', '', ...(rows.results || []).flatMap((row) => [`- [${row.title}](${origin}/blog/${row.slug}) — ${row.excerpt}`, ''])].join('\n')
+}
+
 // Public reads (config, sitemap, testimonials) hit D1 on every request and
 // are cacheable. Caching them server-side prevents quota-exhaustion floods,
 // and every admin write invalidates them so saved changes stay visible
@@ -1461,14 +2133,17 @@ async function getCachedPublic(key, maxAgeSeconds, producer) {
 
 async function invalidatePublicCaches() {
   const cache = caches.default
-  await Promise.all(['config-public', 'sitemap', 'testimonials'].map((key) => cache.delete(`${PUBLIC_CACHE_ORIGIN}/${key}`).catch(() => {})))
+  await Promise.all(['config-public', 'sitemap', 'testimonials', 'blog-index', 'blog-rss', 'blog-llms', 'blog-llms-full'].map((key) => cache.delete(`${PUBLIC_CACHE_ORIGIN}/${key}`).catch(() => {})))
 }
 
 async function rateLimit(request, env, bucket, limit, windowSeconds, subject = '') {
   if (!env.DB) throw new HttpError(503, 'Database is not configured')
   const address = request.headers.get('CF-Connecting-IP') || 'unknown'
-  if (!subject && !env.RATE_LIMIT_SALT) throw new HttpError(503, 'Rate limiting is not configured')
-  const safeSubject = subject || await sha256Hex(`${env.RATE_LIMIT_SALT}:${address}`)
+  if (!env.RATE_LIMIT_SALT) throw new HttpError(503, 'Rate limiting is not configured')
+  // Hash both IP- and identity-based subjects so emails and Supabase user IDs
+  // never appear in D1 rate-limit keys.
+  const identity = subject ? `subject:${subject}` : `ip:${address}`
+  const safeSubject = await sha256Hex(`${env.RATE_LIMIT_SALT}:${identity}`)
   const windowId = Math.floor(Date.now() / (windowSeconds * 1000))
   const key = `${bucket}:${safeSubject}:${windowId}`
   const expiresAt = new Date((windowId + 1) * windowSeconds * 1000).toISOString()
@@ -1547,6 +2222,42 @@ function jwtIssuedAt(request) {
   }
 }
 
+const ADMIN_CHALLENGE_TTL_SECONDS = 5 * 60
+
+async function createAdminChallenge(env, request, user) {
+  const expiresAt = Math.floor(Date.now() / 1000) + ADMIN_CHALLENGE_TTL_SECONDS
+  const payload = stringToBase64Url(JSON.stringify({
+    v: 1,
+    purpose: 'admin-challenge',
+    userId: user.id,
+    sessionIssuedAt: jwtIssuedAt(request),
+    expiresAt,
+    nonce: crypto.randomUUID(),
+  }))
+  return {
+    challenge: `${payload}.${await feedbackSignature(env, payload)}`,
+    expiresAt: new Date(expiresAt * 1000).toISOString(),
+  }
+}
+
+async function verifyAdminChallenge(env, request, user, token) {
+  try {
+    const [payload, suppliedSignature, extra] = String(token || '').split('.')
+    if (!payload || !suppliedSignature || extra) return false
+    const expectedSignature = await feedbackSignature(env, payload)
+    if (!constantTimeEqual(suppliedSignature, expectedSignature)) return false
+    const decoded = JSON.parse(base64UrlToString(payload))
+    return decoded.v === 1
+      && decoded.purpose === 'admin-challenge'
+      && decoded.userId === user.id
+      && decoded.sessionIssuedAt === jwtIssuedAt(request)
+      && Number.isInteger(decoded.expiresAt)
+      && decoded.expiresAt >= Math.floor(Date.now() / 1000)
+  } catch {
+    return false
+  }
+}
+
 async function requireOwner(request, env, { mutation = false } = {}) {
   const user = await authenticate(request, env)
   if (!userIsOwner(user, env)) throw new HttpError(403, 'Owner access required')
@@ -1561,26 +2272,34 @@ async function requireOwner(request, env, { mutation = false } = {}) {
     throw new HttpError(401, 'Re-authenticate to make changes (admin session older than 30 minutes).')
   }
 
-  // TOTP gate. The header may be absent if TOTP is not yet enrolled; in
-  // that case the first mutating request is allowed only if the row in
-  // admin_totp doesn't exist yet (i.e. the owner is enrolling for the
-  // first time). Once enrolled, the header is required on every mutation.
-  const existing = await env.DB.prepare('SELECT 1 AS one FROM admin_totp WHERE id = 1').first().catch(() => null)
-  if (!existing) return user
+  const path = new URL(request.url).pathname
+  const row = await env.DB.prepare('SELECT secret, verified_at FROM admin_totp WHERE id = 1').first().catch(() => null)
 
+  // Bootstrap is deliberately narrow: until 2FA is verified, the owner may
+  // only start/restart and confirm enrolment. A stolen owner JWT cannot use
+  // the absence of a TOTP row to mutate the rest of the store.
+  if (!row || !row.verified_at) {
+    if (path === '/admin/totp/enrol' || path === '/admin/totp/verify') return user
+    throw new HttpError(428, 'Complete two-factor authentication enrolment before making admin changes.')
+  }
+
+  // A current TOTP or one-time recovery code is exchanged at the challenge
+  // endpoint for this signed five-minute token. Raw time-based codes are not
+  // cached or replayed by the browser.
+  if (path === '/admin/totp/challenge') return user
+  const challenge = String(request.headers.get('X-Admin-Challenge') || '').trim()
+  if (challenge && await verifyAdminChallenge(env, request, user, challenge)) return user
+
+  // Keep direct one-action headers for non-browser recovery tooling. The UI
+  // uses challenges, but these are useful during incident recovery.
   const totpCandidate = String(request.headers.get('X-Admin-TOTP') || '').trim()
   const recoveryCandidate = String(request.headers.get('X-Admin-Recovery') || '').trim()
-  if (!totpCandidate && !recoveryCandidate) {
-    throw new HttpError(401, 'An admin authenticator code is required.')
-  }
-  const row = await env.DB.prepare('SELECT secret FROM admin_totp WHERE id = 1').first()
-  if (!row) throw new HttpError(503, 'Admin TOTP is partially configured')
   let ok = false
-  if (totpCandidate && await verifyTotp(row.secret, totpCandidate)) ok = true
+  if (totpCandidate && await verifyTotp(await readTotpSecret(env, row.secret), totpCandidate)) ok = true
   if (!ok && recoveryCandidate && await consumeRecoveryCode(env, recoveryCandidate)) ok = true
   if (!ok) {
     logEvent('warn', 'admin_mutation_totp_failed', { subjectId: user.id })
-    throw new HttpError(401, 'The admin authenticator code is incorrect or has already been used.')
+    throw new HttpError(401, 'A fresh admin security challenge is required.')
   }
   await env.DB.prepare('UPDATE admin_totp SET last_used_at = ? WHERE id = 1').bind(nowIso()).run()
   return user
@@ -1655,11 +2374,22 @@ async function saveSettings(env, input) {
 
 const LEMON_SQUEEZY_API = 'https://api.lemonsqueezy.com/v1'
 
+function lemonSqueezyApiBase(env) {
+  const raw = String(env.LEMONSQUEEZY_API_URL || LEMON_SQUEEZY_API).replace(/\/$/, '')
+  let parsed
+  try { parsed = new URL(raw) } catch { throw new HttpError(503, 'Lemon Squeezy API URL is invalid') }
+  const localDev = ['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)
+  if (parsed.protocol !== 'https:' && !(localDev && parsed.protocol === 'http:')) {
+    throw new HttpError(503, 'Lemon Squeezy API URL must use HTTPS')
+  }
+  return parsed.toString().replace(/\/$/, '')
+}
+
 async function lemonSqueezyRequest(env, path, { method = 'GET', body } = {}) {
   if (!env.LEMONSQUEEZY_API_KEY) throw new HttpError(503, 'Lemon Squeezy API key is not configured')
   let response
   try {
-    response = await fetch(`${LEMON_SQUEEZY_API}${path}`, {
+    response = await fetch(`${lemonSqueezyApiBase(env)}${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${env.LEMONSQUEEZY_API_KEY}`,
@@ -1695,7 +2425,7 @@ function priceInCents(value) {
 // becomes ONE custom-priced checkout: the bundle total is the sum of the
 // suite's D1 sale prices (never client input), the item list is shown in
 // the checkout description, and the paid webhook grants every product key.
-async function createLemonSqueezyCheckout(env, user, items, settings, bundle = null) {
+async function createLemonSqueezyCheckout(env, user, items, settings, bundle = null, consentId = '') {
   const storeId = String(settings.lemonSqueezyStoreId || '').trim()
   if (!storeId) throw new HttpError(503, 'The Lemon Squeezy store is not configured')
   const origin = getPrimaryOrigin(env)
@@ -1713,20 +2443,29 @@ async function createLemonSqueezyCheckout(env, user, items, settings, bundle = n
       custom: {
         user_id: String(user.id || ''),
         product_keys: productKeys.join(','),
+        consent_id: String(consentId || ''),
       },
     },
     product_options: { redirect_url: `${origin}/success`, enabled_variants: [Number(variantId)] },
     expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
   }
+  if (!isMultiItem) {
+    const cents = Math.round(Number(items[0].product.priceCents || 0))
+    if (!Number.isInteger(cents) || cents <= 0) throw new HttpError(503, `The checkout price is not configured for ${items[0].product.name}`)
+    attributes.custom_price = cents
+  }
   if (isMultiItem) {
     const lines = []
     let totalCents = 0
+    const currencies = new Set()
     for (const item of items) {
-      const cents = priceInCents(item.product.salePrice)
-      if (cents === null) throw new HttpError(503, `The displayed price is not configured for ${item.product.name}`)
+      const cents = Math.round(Number(item.product.priceCents || 0))
+      if (!Number.isInteger(cents) || cents <= 0) throw new HttpError(503, `The checkout price is not configured for ${item.product.name}`)
       totalCents += cents
-      lines.push(`${item.product.name} — ${String(item.product.salePrice || '').trim()}`)
+      currencies.add(item.product.currency || 'USD')
+      lines.push(`${item.product.name} — ${centsToDisplay(cents, item.product.currency || 'USD')}`)
     }
+    if (currencies.size !== 1) throw new HttpError(503, 'All products in one checkout must use the same currency')
     // A named bundle applies its percentage discount here, server-side, from
     // the D1 row. This is the only place the sale price is decided.
     let checkoutName = 'Runway Systems Suite Bundle'
@@ -1849,7 +2588,7 @@ async function createCheckoutSession(request, env, user) {
     nowIso(),
   ).run()
 
-  const session = await createLemonSqueezyCheckout(env, user, items, settings, bundle)
+  const session = await createLemonSqueezyCheckout(env, user, items, settings, bundle, consentId)
 
   if (session.checkoutId) {
     await env.DB.prepare('UPDATE checkout_consents SET checkout_id = ? WHERE id = ?')
@@ -1890,6 +2629,8 @@ function purchaseFromRow(row, productInfo = null) {
     amountTotal: Number(row.amount_total || 0),
     currency: row.currency || 'usd',
     paymentStatus: row.payment_status,
+    accessSource: row.access_source || 'paid',
+    accessStatus: row.access_status || 'active',
     createdAt: row.created_at,
     deliveryEmailStatus: row.delivery_email_status,
   }
@@ -1899,7 +2640,7 @@ function purchaseFromRow(row, productInfo = null) {
 
 async function findPurchaseForUser(env, purchaseId, userId) {
   const row = await env.DB.prepare(`
-    SELECT * FROM purchases WHERE id = ? AND user_id = ? AND payment_status = 'paid'
+    SELECT * FROM purchases WHERE id = ? AND user_id = ? AND payment_status = 'paid' AND access_status = 'active'
   `).bind(purchaseId, userId).first()
   if (!row) throw new HttpError(404, 'Purchase not found for this account')
   return row
@@ -1988,9 +2729,18 @@ async function clearBrevoQuotaState(env) {
   }
 }
 
+function brevoApiUrl(env) {
+  const raw = String(env.BREVO_API_URL || 'https://api.brevo.com/v3/smtp/email')
+  let parsed
+  try { parsed = new URL(raw) } catch { throw new BrevoError('Brevo API URL is invalid') }
+  const localDev = ['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)
+  if (parsed.protocol !== 'https:' && !(localDev && parsed.protocol === 'http:')) throw new BrevoError('Brevo API URL must use HTTPS')
+  return parsed.toString()
+}
+
 async function sendBrevo(env, message) {
   if (!env.BREVO_API_KEY || !message.from) throw new BrevoError('Brevo is not configured')
-  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+  const response = await fetch(brevoApiUrl(env), {
     method: 'POST',
     headers: {
       'api-key': env.BREVO_API_KEY,
@@ -2003,8 +2753,14 @@ async function sendBrevo(env, message) {
       subject: message.subject,
       htmlContent: message.html,
       textContent: message.text,
-      ...(message.idempotencyKey ? { headers: { 'X-Request-Id': message.idempotencyKey } } : {}),
+      ...((message.idempotencyKey || message.headers) ? {
+        headers: {
+          ...(message.headers || {}),
+          ...(message.idempotencyKey ? { 'X-Request-Id': message.idempotencyKey } : {}),
+        },
+      } : {}),
     }),
+    signal: AbortSignal.timeout(10000),
   })
   if (response.ok) {
     // Any successful send proves the cap has lifted. Drop the recorded
@@ -2067,6 +2823,62 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 }
 
+async function marketingEmailHash(env, email) {
+  return sha256Hex(`${env.RATE_LIMIT_SALT || 'runway-marketing'}:marketing:${String(email || '').trim().toLowerCase()}`)
+}
+
+async function suppressMarketingEmail(env, email, reason = 'recipient_request') {
+  const cleanEmail = String(email || '').trim().toLowerCase()
+  if (!cleanEmail) return
+  const emailHash = await marketingEmailHash(env, cleanEmail)
+  await env.DB.prepare(`
+    INSERT INTO marketing_suppressions (email_hash, unsubscribed_at, reason)
+    VALUES (?, ?, ?)
+    ON CONFLICT(email_hash) DO UPDATE SET unsubscribed_at = excluded.unsubscribed_at, reason = excluded.reason
+  `).bind(emailHash, nowIso(), reason).run()
+  await env.DB.prepare("UPDATE audience_contacts SET status = 'unsubscribed' WHERE email = ?").bind(cleanEmail).run()
+  await env.DB.prepare(`
+    UPDATE marketing_deliveries
+    SET status = 'failed', attempts = 5, last_error = 'Recipient unsubscribed', updated_at = ?
+    WHERE recipient_email = ? AND kind = 'campaign' AND status != 'sent'
+  `).bind(nowIso(), cleanEmail).run()
+}
+
+async function createUnsubscribeToken(env, email) {
+  const token = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)))
+  const createdAt = nowIso()
+  const expiresAt = new Date(Date.now() + 2 * 365 * 24 * 60 * 60 * 1000).toISOString()
+  await env.DB.prepare(`
+    INSERT INTO marketing_unsubscribe_tokens (token_hash, email, created_at, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).bind(await sha256Hex(token), String(email).trim().toLowerCase(), createdAt, expiresAt).run()
+  return token
+}
+
+async function emailForUnsubscribeToken(env, token) {
+  const raw = String(token || '').trim()
+  if (!/^[A-Za-z0-9_-]{40,100}$/.test(raw)) return ''
+  const row = await env.DB.prepare(`
+    SELECT email FROM marketing_unsubscribe_tokens
+    WHERE token_hash = ? AND expires_at >= ? AND COALESCE(used_at, '') = ''
+  `).bind(await sha256Hex(raw), nowIso()).first()
+  return String(row?.email || '').trim().toLowerCase()
+}
+
+async function consumeUnsubscribeToken(env, token) {
+  const raw = String(token || '').trim()
+  if (!/^[A-Za-z0-9_-]{40,100}$/.test(raw)) throw new HttpError(400, 'This unsubscribe link is invalid or expired')
+  const consumed = await env.DB.prepare(`
+    UPDATE marketing_unsubscribe_tokens SET used_at = ?
+    WHERE token_hash = ? AND COALESCE(used_at, '') = '' AND expires_at >= ?
+    RETURNING email
+  `).bind(nowIso(), await sha256Hex(raw), nowIso()).first()
+  const email = String(consumed?.email || '').trim().toLowerCase()
+  if (!email) throw new HttpError(400, 'This unsubscribe link is invalid or expired')
+  await suppressMarketingEmail(env, email)
+  return email
+}
+
 async function recordAudienceContact(env, {
   email,
   userId = '',
@@ -2076,7 +2888,11 @@ async function recordAudienceContact(env, {
   isCustomer = false,
   spendCents = 0,
   productKey = '',
+  productKeys = [],
+  orderIncrement = 0,
   waitlistKey = '',
+  marketingOptIn = false,
+  marketingOptInSource = '',
 }) {
   if (!env.DB || !email || !isValidEmail(email)) return
   const cleanEmail = String(email).trim().toLowerCase()
@@ -2089,14 +2905,15 @@ async function recordAudienceContact(env, {
     const existing = await env.DB.prepare('SELECT * FROM audience_contacts WHERE email = ?').bind(cleanEmail).first()
     if (existing) {
       const owned = parseJsonSafe(existing.products_owned, [])
-      if (productKey && !owned.includes(productKey)) owned.push(productKey)
+      const nextProductKeys = [productKey, ...(Array.isArray(productKeys) ? productKeys : [])].filter(Boolean)
+      for (const key of nextProductKeys) if (!owned.includes(key)) owned.push(key)
 
       const waitlists = parseJsonSafe(existing.waitlists_joined, [])
       if (waitlistKey && !waitlists.includes(waitlistKey)) waitlists.push(waitlistKey)
 
       const nextCustomer = (existing.is_customer || isCustomer || owned.length > 0) ? 1 : 0
       const nextSpend = (existing.total_spend_cents || 0) + (spendCents || 0)
-      const nextOrders = (existing.orders_count || 0) + (spendCents > 0 || productKey ? 1 : 0)
+      const nextOrders = (existing.orders_count || 0) + Math.max(0, Number(orderIncrement) || 0)
       const nextName = cleanName || existing.name || ''
       const nextAvatar = cleanAvatar || existing.avatar_url || ''
       const nextUserId = cleanUserId || existing.user_id || ''
@@ -2111,6 +2928,10 @@ async function recordAudienceContact(env, {
             orders_count = ?,
             products_owned = ?,
             waitlists_joined = ?,
+            status = CASE WHEN ? = 1 THEN 'subscribed' ELSE status END,
+            marketing_opt_in_at = CASE WHEN ? = 1 THEN ? ELSE marketing_opt_in_at END,
+            marketing_opt_in_source = CASE WHEN ? = 1 THEN ? ELSE marketing_opt_in_source END,
+            marketing_opt_in_policy_version = CASE WHEN ? = 1 THEN ? ELSE marketing_opt_in_policy_version END,
             last_seen_at = ?
         WHERE email = ?
       `).bind(
@@ -2122,19 +2943,24 @@ async function recordAudienceContact(env, {
         nextOrders,
         JSON.stringify(owned),
         JSON.stringify(waitlists),
+        marketingOptIn ? 1 : 0,
+        marketingOptIn ? 1 : 0, now,
+        marketingOptIn ? 1 : 0, marketingOptInSource || source,
+        marketingOptIn ? 1 : 0, 'marketing-v1',
         now,
         cleanEmail
       ).run()
     } else {
       const id = makeId('contact')
-      const owned = productKey ? [productKey] : []
+      const owned = [...new Set([productKey, ...(Array.isArray(productKeys) ? productKeys : [])].filter(Boolean))]
       const waitlists = waitlistKey ? [waitlistKey] : []
       await env.DB.prepare(`
         INSERT INTO audience_contacts (
           id, email, user_id, name, avatar_url, source, status,
           is_customer, total_spend_cents, orders_count, products_owned,
-          waitlists_joined, last_seen_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, ?, ?, ?, ?, ?)
+          waitlists_joined, marketing_opt_in_at, marketing_opt_in_source,
+          marketing_opt_in_policy_version, last_seen_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         id,
         cleanEmail,
@@ -2142,18 +2968,125 @@ async function recordAudienceContact(env, {
         cleanName,
         cleanAvatar,
         source,
-        (isCustomer || productKey) ? 1 : 0,
+        marketingOptIn ? 'subscribed' : 'unsubscribed',
+        (isCustomer || owned.length > 0) ? 1 : 0,
         spendCents || 0,
-        (spendCents > 0 || productKey) ? 1 : 0,
+        Math.max(0, Number(orderIncrement) || 0),
         JSON.stringify(owned),
         JSON.stringify(waitlists),
+        marketingOptIn ? now : '',
+        marketingOptIn ? (marketingOptInSource || source) : '',
+        marketingOptIn ? 'marketing-v1' : '',
         now,
         now
       ).run()
     }
+    // Only a successfully persisted, explicit opt-in may clear a previous
+    // suppression. If this delete fails, campaign queries still fail safe by
+    // excluding the durable suppression row.
+    if (marketingOptIn) {
+      await env.DB.prepare('DELETE FROM marketing_suppressions WHERE email_hash = ?')
+        .bind(await marketingEmailHash(env, cleanEmail)).run()
+    }
   } catch (err) {
     console.error('Failed to record audience contact', err?.message)
   }
+}
+
+async function requestNewsletterConfirmation(request, env, input) {
+  const generic = { accepted: true, message: 'Check your inbox. A confirmation message is on its way if this address can receive Blog emails.' }
+  // A filled honeypot gets the same response but creates no contact, token, or
+  // provider call. Bots cannot use the response to tune around the trap.
+  if (String(input.company || '').trim()) return generic
+  if (input.consent !== true) throw new HttpError(400, 'Confirm that you want to receive Runway Systems Blog emails')
+  const email = cleanText(input.email, 254, 'Email').trim().toLowerCase()
+  if (!isValidEmail(email)) throw new HttpError(400, 'Please enter a valid email address')
+  const requestedSource = cleanText(input.source || 'site_footer', 40, 'Source', { required: false })
+  const source = NEWSLETTER_SOURCES.has(requestedSource) ? requestedSource : 'site_footer'
+  await rateLimit(request, env, 'newsletter-ip', 20, 3600)
+  await rateLimit(request, env, 'newsletter-email', 5, 24 * 60 * 60, email)
+
+  const subscribed = await env.DB.prepare(`
+    SELECT id FROM audience_contacts
+    WHERE email = ? AND status = 'subscribed' AND marketing_opt_in_at != ''
+      AND NOT EXISTS (SELECT 1 FROM marketing_suppressions WHERE email_hash = ?)
+  `).bind(email, await marketingEmailHash(env, email)).first()
+  if (subscribed) return generic
+
+  const rawToken = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)))
+  const tokenHash = await sha256Hex(rawToken)
+  const createdAt = nowIso()
+  const expiresAt = new Date(Date.now() + NEWSLETTER_CONFIRMATION_TTL_MS).toISOString()
+  // Keep at most one live request per address. Previous links become invalid
+  // before a replacement is sent.
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM newsletter_confirmations WHERE email = ? AND COALESCE(used_at, \'\') = \'\'').bind(email),
+    env.DB.prepare(`
+      INSERT INTO newsletter_confirmations
+        (token_hash, email, source, policy_version, created_at, expires_at, used_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL)
+    `).bind(tokenHash, email, source, NEWSLETTER_POLICY_VERSION, createdAt, expiresAt),
+  ])
+
+  const confirmUrl = `${getPrimaryOrigin(env)}/newsletter/confirm#token=${encodeURIComponent(rawToken)}`
+  const html = emailLayout(
+    'Confirm your Blog emails',
+    'One final step: confirm that you want occasional Runway Systems Blog articles about money, clients, projects, and calmer business operations.',
+    'Review and confirm',
+    confirmUrl,
+    'This confirmation link expires in 48 hours. If you did not request these emails, you can safely ignore this message.',
+    null,
+    'RUNWAY SYSTEMS BLOG · EMAIL UPDATES',
+  )
+  try {
+    await sendBrevo(env, {
+      to: email,
+      from: env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud',
+      fromName: 'Runway Systems',
+      subject: 'Confirm your Runway Systems Blog emails',
+      html,
+      text: `Confirm your Runway Systems Blog emails: ${confirmUrl}\n\nThis link expires in 48 hours. If you did not request these emails, ignore this message.`,
+      idempotencyKey: `newsletter-confirm-${tokenHash.slice(0, 24)}`,
+    })
+  } catch (error) {
+    await env.DB.prepare('DELETE FROM newsletter_confirmations WHERE token_hash = ?').bind(tokenHash).run().catch(() => {})
+    logEvent('warn', 'newsletter.confirmation_email_failed', { error: error?.message })
+    // Keep the same public response as subscribed, pending, and honeypot paths.
+    // Provider availability must not become an address-enumeration oracle.
+  }
+  return generic
+}
+
+async function confirmNewsletterSubscription(request, env, input) {
+  const token = cleanText(input.token, 120, 'Confirmation token')
+  if (!/^[A-Za-z0-9_-]{40,100}$/.test(token)) throw new HttpError(400, 'This confirmation link is invalid or expired')
+  await rateLimit(request, env, 'newsletter-confirm', 20, 3600, token)
+  const confirmedAt = nowIso()
+  const tokenHash = await sha256Hex(token)
+  const row = await env.DB.prepare(`
+    UPDATE newsletter_confirmations SET used_at = ?
+    WHERE token_hash = ? AND COALESCE(used_at, '') = '' AND expires_at >= ?
+    RETURNING email, source, policy_version
+  `).bind(confirmedAt, tokenHash, confirmedAt).first()
+  if (!row?.email) throw new HttpError(410, 'This confirmation link is invalid, expired, or already used')
+
+  await recordAudienceContact(env, {
+    email: row.email,
+    source: 'manual',
+    marketingOptIn: true,
+    marketingOptInSource: `newsletter_${row.source || 'site_footer'}`,
+  })
+  const contact = await env.DB.prepare(`
+    SELECT id FROM audience_contacts
+    WHERE email = ? AND status = 'subscribed' AND marketing_opt_in_at != ''
+      AND NOT EXISTS (SELECT 1 FROM marketing_suppressions WHERE email_hash = ?)
+  `).bind(row.email, await marketingEmailHash(env, row.email)).first()
+  if (!contact) {
+    await env.DB.prepare('UPDATE newsletter_confirmations SET used_at = NULL WHERE token_hash = ? AND used_at = ?').bind(tokenHash, confirmedAt).run().catch(() => {})
+    throw new HttpError(503, 'The subscription could not be confirmed. Please try again shortly.')
+  }
+  await env.DB.prepare("DELETE FROM newsletter_confirmations WHERE email = ? AND COALESCE(used_at, '') = ''").bind(row.email).run()
+  return { confirmed: true, message: 'You are subscribed to Runway Systems Blog email updates.' }
 }
 
 function renderMarketingTemplate(text, contact = {}, product = null) {
@@ -2245,6 +3178,382 @@ ${unsubscribeSection}
 </html>`
 }
 
+function complimentaryGrantFromRow(row, items = []) {
+  return {
+    id: row.id,
+    recipientEmail: row.recipient_email,
+    status: row.status,
+    products: items,
+    emailStatus: row.email_status,
+    emailAttempts: Number(row.email_attempts || 0),
+    emailSentAt: row.email_sent_at || '',
+    emailLastError: row.email_last_error || '',
+    tokenExpiresAt: row.token_expires_at,
+    claimedByUserId: row.claimed_by_user_id || '',
+    claimedAt: row.claimed_at || '',
+    reviewInvitedAt: row.review_invited_at || '',
+    revokedAt: row.revoked_at || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+async function complimentaryItemsByGrant(env, grantIds) {
+  const ids = [...new Set((grantIds || []).filter(Boolean))]
+  const grouped = new Map(ids.map((id) => [id, []]))
+  if (!ids.length) return grouped
+  const placeholders = ids.map(() => '?').join(',')
+  const rows = await env.DB.prepare(`
+    SELECT i.grant_id, i.product_key, i.purchase_id, i.item_status, p.name
+    FROM complimentary_grant_items i
+    LEFT JOIN products p ON p.key = i.product_key
+    WHERE i.grant_id IN (${placeholders})
+    ORDER BY i.created_at ASC, i.product_key ASC
+  `).bind(...ids).all()
+  for (const row of rows.results || []) {
+    const list = grouped.get(row.grant_id) || []
+    list.push({
+      productKey: row.product_key,
+      productName: row.name || fallbackProductName(row.product_key),
+      purchaseId: row.purchase_id || '',
+      status: row.item_status,
+    })
+    grouped.set(row.grant_id, list)
+  }
+  return grouped
+}
+
+async function getComplimentaryGrants(env, { limit = 100, status = '', search = '' } = {}) {
+  const where = []
+  const params = []
+  if (status) {
+    if (!['pending', 'claimed', 'cancelled', 'expired', 'revoked'].includes(status)) throw new HttpError(400, 'Invalid complimentary access status')
+    where.push('status = ?')
+    params.push(status)
+  }
+  if (search) {
+    where.push('LOWER(recipient_email) LIKE ?')
+    params.push(`%${search.toLowerCase()}%`)
+  }
+  const safeLimit = Math.min(75, Math.max(1, Number(limit) || 75))
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  const rows = await env.DB.prepare(`
+    SELECT * FROM complimentary_grants ${clause}
+    ORDER BY created_at DESC LIMIT ?
+  `).bind(...params, safeLimit).all()
+  const grants = rows.results || []
+  const itemMap = await complimentaryItemsByGrant(env, grants.map((grant) => grant.id))
+  const counts = await env.DB.prepare(`
+    SELECT COUNT(*) AS total,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN status = 'claimed' THEN 1 ELSE 0 END) AS claimed,
+      SUM(CASE WHEN status = 'revoked' THEN 1 ELSE 0 END) AS revoked
+    FROM complimentary_grants
+  `).first()
+  return {
+    grants: grants.map((grant) => complimentaryGrantFromRow(grant, itemMap.get(grant.id) || [])),
+    stats: {
+      total: Number(counts?.total || 0),
+      pending: Number(counts?.pending || 0),
+      claimed: Number(counts?.claimed || 0),
+      revoked: Number(counts?.revoked || 0),
+    },
+  }
+}
+
+async function sendComplimentaryInvitationEmail(env, grant) {
+  if (!grant.token_ciphertext) throw new Error('Complimentary claim token is unavailable')
+  const token = await decryptSensitiveValue(env, 'complimentary-claim-token', grant.token_ciphertext)
+  const itemMap = await complimentaryItemsByGrant(env, [grant.id])
+  const items = itemMap.get(grant.id) || []
+  if (!items.length) throw new Error('Complimentary invitation has no products')
+  const productNames = items.map((item) => item.productName)
+  const productLabel = productNames.length === 1 ? productNames[0] : `${productNames.length} Runway Systems products`
+  const claimUrl = `${getPrimaryOrigin(env)}/claim#token=${encodeURIComponent(token)}`
+  const intro = `${productNames.join(', ')} ${productNames.length === 1 ? 'has' : 'have'} been provided to you at no cost. Claim with the exact Google account for ${grant.recipient_email}. No payment is required, and this email does not subscribe you to marketing.`
+  const footer = `This private invitation expires ${new Date(grant.token_expires_at).toUTCString()}. The claim link expires immediately after use. Product access then remains in your verified account library. By claiming, you agree to the Runway Systems Terms and Privacy Policy. Need help? ${env.SUPPORT_EMAIL || 'Contact Runway Systems support.'}`
+  await sendBrevo(env, {
+    to: grant.recipient_email,
+    from: env.EMAIL_FROM_DELIVERY,
+    subject: `Your complimentary ${productLabel} access is ready`,
+    idempotencyKey: `runway-complimentary-${grant.id}-${grant.email_attempts}`,
+    html: emailLayout(
+      'Your complimentary access is ready.',
+      intro,
+      'Claim my products',
+      claimUrl,
+      footer,
+      null,
+      'RUNWAY SYSTEMS / COMPLIMENTARY ACCESS',
+    ),
+    text: `Your complimentary access is ready.\n\n${intro}\n\nClaim your products: ${claimUrl}\n\n${footer}`,
+  })
+}
+
+async function deliverComplimentaryInvitation(env, grantOrId) {
+  const grantId = typeof grantOrId === 'string' ? grantOrId : grantOrId?.id
+  if (!grantId) return false
+  const claimedAt = nowIso()
+  const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+  const claimed = await env.DB.prepare(`
+    UPDATE complimentary_grants
+    SET email_status = 'sending', email_attempts = email_attempts + 1,
+        email_last_error = NULL, updated_at = ?
+    WHERE id = ? AND status = 'pending' AND token_expires_at >= ?
+      AND email_attempts < 5
+      AND (email_status IN ('pending', 'failed') OR (email_status = 'sending' AND updated_at <= ?))
+      AND (email_next_eligible_at = '' OR email_next_eligible_at <= ?)
+    RETURNING *
+  `).bind(claimedAt, grantId, claimedAt, staleBefore, claimedAt).first()
+  if (!claimed) return false
+
+  try {
+    await sendComplimentaryInvitationEmail(env, claimed)
+    const sentAt = nowIso()
+    await env.DB.prepare(`
+      UPDATE complimentary_grants
+      SET email_status = 'sent', email_sent_at = ?, email_last_error = NULL,
+          email_next_eligible_at = '', token_ciphertext = NULL, updated_at = ?
+      WHERE id = ? AND email_status = 'sending'
+    `).bind(sentAt, sentAt, grantId).run()
+    return true
+  } catch (error) {
+    const errorText = redactPii(String(error?.message || error)).slice(0, 500)
+    const cooldownSeconds = Math.max(60, Number(error?.retryAfterSeconds) || 0)
+    const cooldownAt = new Date(Date.now() + cooldownSeconds * 1000).toISOString()
+    await env.DB.prepare(`
+      UPDATE complimentary_grants
+      SET email_status = 'failed', email_last_error = ?, email_next_eligible_at = ?, updated_at = ?
+      WHERE id = ? AND email_status = 'sending'
+    `).bind(errorText, cooldownAt, cooldownAt, grantId).run()
+    logEvent('warn', 'complimentary_invitation_delivery_failed', { grantId, attempts: claimed.email_attempts, error: errorText })
+    return false
+  }
+}
+
+async function createComplimentaryGrant(env, ownerUser, input) {
+  const email = cleanText(input.email, 254, 'Recipient email').trim().toLowerCase()
+  if (!isValidEmail(email)) throw new HttpError(400, 'Please enter a valid recipient email address')
+  const idempotencyKey = cleanText(input.idempotencyKey, 100, 'Idempotency key')
+  if (!/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) throw new HttpError(400, 'Idempotency key format is invalid')
+  const requestedKeys = [...new Set((Array.isArray(input.productKeys) ? input.productKeys : []).map((value) => String(value || '').trim()).filter(Boolean))]
+  if (!requestedKeys.length || requestedKeys.length > 10) throw new HttpError(400, 'Select between one and ten products')
+
+  const existingRequest = await env.DB.prepare('SELECT * FROM complimentary_grants WHERE idempotency_key = ?').bind(idempotencyKey).first()
+  if (existingRequest) {
+    const itemMap = await complimentaryItemsByGrant(env, [existingRequest.id])
+    return { duplicate: true, grant: complimentaryGrantFromRow(existingRequest, itemMap.get(existingRequest.id) || []), skippedProductKeys: [] }
+  }
+
+  await ensureProductsSeeded(env)
+  const eligible = []
+  for (const productKey of requestedKeys) {
+    if (!PRODUCT_KEY_PATTERN.test(productKey)) throw new HttpError(400, 'A selected product key is invalid')
+    const product = await resolveProductConfig(env, productKey)
+    if (product.status !== 'active' || product.active === false) {
+      throw new HttpError(409, `${product.name || 'Product'} must be active before complimentary access can be granted`)
+    }
+    productDeliveryUrl(env, product)
+    eligible.push(product)
+  }
+
+  const alreadyOwned = await env.DB.prepare(`
+    SELECT DISTINCT product_key FROM purchases
+    WHERE LOWER(customer_email) = ? AND payment_status = 'paid' AND access_status = 'active'
+  `).bind(email).all()
+  const pending = await env.DB.prepare(`
+    SELECT DISTINCT i.product_key
+    FROM complimentary_grant_items i
+    JOIN complimentary_grants g ON g.id = i.grant_id
+    WHERE g.recipient_email = ? AND g.status = 'pending'
+  `).bind(email).all()
+  const unavailable = new Set([...(alreadyOwned.results || []), ...(pending.results || [])].map((row) => row.product_key))
+  const products = eligible.filter((product) => !unavailable.has(product.key))
+  const skippedProductKeys = eligible.filter((product) => unavailable.has(product.key)).map((product) => product.key)
+  if (!products.length) throw new HttpError(409, 'This recipient already owns or has a pending invitation for every selected product')
+
+  const grantId = makeId('complimentary')
+  const rawToken = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)))
+  const tokenHash = await sha256Hex(rawToken)
+  const tokenCiphertext = await encryptSensitiveValue(env, 'complimentary-claim-token', rawToken)
+  const createdAt = nowIso()
+  const expiresAt = new Date(Date.now() + COMPLIMENTARY_TOKEN_TTL_MS).toISOString()
+  const emailHash = await sha256Hex(`${env.RATE_LIMIT_SALT}:complimentary:${email}`)
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO complimentary_grants (
+        id, recipient_email, recipient_email_hash, status, token_hash, token_ciphertext,
+        token_expires_at, created_by_user_id, idempotency_key, email_status,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).bind(grantId, email, emailHash, tokenHash, tokenCiphertext, expiresAt, ownerUser.id, idempotencyKey, createdAt, createdAt),
+    ...products.map((product) => env.DB.prepare(`
+      INSERT INTO complimentary_grant_items (grant_id, product_key, created_at)
+      VALUES (?, ?, ?)
+    `).bind(grantId, product.key, createdAt)),
+  ])
+  await recordAudienceContact(env, { email, source: 'manual', isCustomer: true })
+  await refreshComplimentaryAudienceForEmail(env, email)
+  const row = await env.DB.prepare('SELECT * FROM complimentary_grants WHERE id = ?').bind(grantId).first()
+  const itemMap = await complimentaryItemsByGrant(env, [grantId])
+  return { duplicate: false, grant: complimentaryGrantFromRow(row, itemMap.get(grantId) || []), skippedProductKeys }
+}
+
+async function refreshComplimentaryAudienceForEmail(env, email) {
+  const cleanEmail = String(email || '').trim().toLowerCase()
+  if (!cleanEmail) return
+  const grants = await env.DB.prepare(`
+    SELECT id, status FROM complimentary_grants
+    WHERE recipient_email = ? AND status IN ('pending', 'claimed')
+  `).bind(cleanEmail).all()
+  const activeGrants = grants.results || []
+  const grantIds = activeGrants.map((grant) => grant.id)
+  const itemMap = await complimentaryItemsByGrant(env, grantIds)
+  const complimentaryProducts = [...new Set(activeGrants.flatMap((grant) => (itemMap.get(grant.id) || []).map((item) => item.productKey)))]
+  const ownedRows = await env.DB.prepare(`
+    SELECT DISTINCT product_key FROM purchases
+    WHERE LOWER(customer_email) = ? AND payment_status = 'paid' AND access_status = 'active'
+  `).bind(cleanEmail).all()
+  const owned = (ownedRows.results || []).map((row) => row.product_key)
+  const paid = await env.DB.prepare(`
+    SELECT COUNT(*) AS total FROM purchases
+    WHERE LOWER(customer_email) = ? AND payment_status = 'paid' AND access_source = 'paid' AND access_status = 'active'
+  `).bind(cleanEmail).first()
+  const hasClaimed = activeGrants.some((grant) => grant.status === 'claimed')
+  const hasPending = activeGrants.some((grant) => grant.status === 'pending')
+  await env.DB.prepare(`
+    UPDATE audience_contacts
+    SET complimentary_status = ?, complimentary_products = ?, products_owned = ?,
+        is_customer = ?
+    WHERE email = ?
+  `).bind(
+    hasClaimed ? 'active' : (hasPending ? 'pending' : ''),
+    JSON.stringify(complimentaryProducts),
+    JSON.stringify(owned),
+    (activeGrants.length > 0 || Number(paid?.total || 0) > 0) ? 1 : 0,
+    cleanEmail,
+  ).run()
+}
+
+async function claimComplimentaryGrant(env, user, rawToken) {
+  const token = String(rawToken || '').trim()
+  if (!/^[A-Za-z0-9_-]{40,100}$/.test(token)) throw new HttpError(400, 'This complimentary invitation is invalid or expired')
+  const tokenHash = await sha256Hex(token)
+  const grant = await env.DB.prepare(`
+    SELECT * FROM complimentary_grants
+    WHERE token_hash = ? AND status = 'pending' AND token_expires_at >= ?
+  `).bind(tokenHash, nowIso()).first()
+  if (!grant) throw new HttpError(410, 'This complimentary invitation is invalid, expired, or already used')
+  const verified = Boolean(user.email_confirmed_at || user.confirmed_at || user?.app_metadata?.provider === 'google')
+  if (!verified) throw new HttpError(403, 'A verified account email is required to claim this invitation')
+  const userEmail = String(user.email || '').trim().toLowerCase()
+  if (userEmail !== String(grant.recipient_email || '').trim().toLowerCase()) {
+    throw new HttpError(403, 'Sign in with the exact email address that received this invitation')
+  }
+
+  const itemMap = await complimentaryItemsByGrant(env, [grant.id])
+  const items = itemMap.get(grant.id) || []
+  if (!items.length) throw new HttpError(409, 'This complimentary invitation has no products')
+  const productInfo = new Map()
+  for (const item of items) {
+    const product = await resolveProductConfig(env, item.productKey)
+    productDeliveryUrl(env, product)
+    productInfo.set(item.productKey, product)
+  }
+
+  const claimedAt = nowIso()
+  const customerName = String(user.user_metadata?.full_name || user.user_metadata?.name || '').trim().slice(0, 100)
+  const statements = [env.DB.prepare(`
+    UPDATE complimentary_grants
+    SET status = 'claimed', token_hash = NULL, token_ciphertext = NULL,
+        token_used_at = ?, claimed_by_user_id = ?, claimed_at = ?,
+        accepted_policy_version = ?, accepted_policy_text = ?, updated_at = ?
+    WHERE id = ? AND token_hash = ? AND status = 'pending' AND token_expires_at >= ?
+  `).bind(claimedAt, user.id, claimedAt, COMPLIMENTARY_POLICY_VERSION, COMPLIMENTARY_POLICY_TEXT, claimedAt, grant.id, tokenHash, claimedAt)]
+
+  for (const item of items) {
+    const existing = await env.DB.prepare(`
+      SELECT id FROM purchases
+      WHERE user_id = ? AND product_key = ? AND payment_status = 'paid' AND access_status = 'active'
+      ORDER BY created_at ASC LIMIT 1
+    `).bind(user.id, item.productKey).first()
+    if (existing) {
+      statements.push(env.DB.prepare(`
+        UPDATE complimentary_grant_items
+        SET purchase_id = ?, item_status = 'already_owned'
+        WHERE grant_id = ? AND product_key = ?
+          AND EXISTS (SELECT 1 FROM complimentary_grants WHERE id = ? AND claimed_at = ? AND claimed_by_user_id = ?)
+      `).bind(existing.id, grant.id, item.productKey, grant.id, claimedAt, user.id))
+      continue
+    }
+    const product = productInfo.get(item.productKey)
+    const purchaseId = `complimentary_${(await sha256Hex(`${grant.id}:${item.productKey}`)).slice(0, 40)}`
+    statements.push(env.DB.prepare(`
+      INSERT OR IGNORE INTO purchases (
+        id, order_identifier, user_id, customer_email, customer_name, variant_id,
+        amount_total, currency, payment_status, product_key, delivery_email_status,
+        delivery_email_attempts, delivery_email_sent_at, created_at, updated_at,
+        consent_at, consent_policy_version, delivery_email_next_eligible_at,
+        checkout_id, access_source, access_status, complimentary_grant_id
+      )
+      SELECT ?, ?, ?, ?, ?, '', 0, ?, 'paid', ?, 'sent', 1, ?, ?, ?, ?, ?, '', '', 'complimentary', 'active', ?
+      WHERE EXISTS (
+        SELECT 1 FROM complimentary_grants
+        WHERE id = ? AND claimed_at = ? AND claimed_by_user_id = ? AND status = 'claimed'
+      )
+    `).bind(
+      purchaseId,
+      `complimentary:${grant.id}`,
+      user.id,
+      userEmail,
+      customerName,
+      String(product.currency || 'USD').toLowerCase(),
+      item.productKey,
+      claimedAt,
+      claimedAt,
+      claimedAt,
+      claimedAt,
+      COMPLIMENTARY_POLICY_VERSION,
+      grant.id,
+      grant.id,
+      claimedAt,
+      user.id,
+    ))
+    statements.push(env.DB.prepare(`
+      UPDATE complimentary_grant_items
+      SET purchase_id = ?, item_status = 'granted'
+      WHERE grant_id = ? AND product_key = ?
+        AND EXISTS (SELECT 1 FROM complimentary_grants WHERE id = ? AND claimed_at = ? AND claimed_by_user_id = ?)
+    `).bind(purchaseId, grant.id, item.productKey, grant.id, claimedAt, user.id))
+  }
+
+  const result = await env.DB.batch(statements)
+  if (Number(result[0]?.meta?.changes || 0) !== 1) throw new HttpError(410, 'This complimentary invitation was already claimed')
+  await recordAudienceContact(env, {
+    email: userEmail,
+    userId: user.id,
+    name: customerName,
+    avatarUrl: user.user_metadata?.avatar_url || user.user_metadata?.picture || '',
+    source: 'manual',
+    isCustomer: true,
+    productKeys: items.map((item) => item.productKey),
+  })
+  await refreshComplimentaryAudienceForEmail(env, userEmail)
+
+  const purchases = await env.DB.prepare(`
+    SELECT DISTINCT p.* FROM purchases p
+    JOIN complimentary_grant_items i ON i.purchase_id = p.id
+    WHERE i.grant_id = ? AND p.user_id = ? AND p.payment_status = 'paid' AND p.access_status = 'active'
+    ORDER BY p.created_at DESC
+  `).bind(grant.id, user.id).all()
+  const publicInfo = await productInfoMap(env)
+  return {
+    claimed: true,
+    grantId: grant.id,
+    products: (purchases.results || []).map((purchase) => purchaseFromRow(purchase, publicInfo)),
+  }
+}
+
 async function sendDeliveryEmail(env, purchase, product) {
   const productName = product.name || fallbackProductName(purchase.product_key)
   const deliveryUrl = productDeliveryUrl(env, product)
@@ -2329,9 +3638,15 @@ async function sendReviewEmail(env, request, settings) {
   const feedbackUrl = `${origin}/feedback?token=${encodeURIComponent(feedbackToken)}`
   const trustpilotUrl = settings.trustpilotBusinessUrl
   const productName = await productNameForPurchase(env, request.purchase_id)
+  const purchase = await env.DB.prepare('SELECT access_source FROM purchases WHERE id = ?').bind(request.purchase_id).first()
+  const complimentary = purchase?.access_source === 'complimentary'
   const prompt = settings.emailTemplateText || `How's ${productName.toUpperCase()} working for you?`
-  const intro = 'Your honest experience helps Runway Systems improve. Every verified buyer receives this same neutral invitation, regardless of their experience or rating. You can leave an independent Trustpilot review or send private feedback directly to our team.'
-  const footer = `This invitation is sent consistently to verified buyers. The private feedback link expires after 30 days. Need help? ${env.SUPPORT_EMAIL || 'Contact Runway Systems support.'}`
+  const intro = complimentary
+    ? 'You received this product through complimentary access. If you have used it, your honest experience can help Runway Systems improve. You may leave an independent Trustpilot review or send private feedback; no particular rating is expected and no benefit depends on your response.'
+    : 'Your honest experience helps Runway Systems improve. Every verified buyer receives this same neutral invitation, regardless of their experience or rating. You can leave an independent Trustpilot review or send private feedback directly to our team.'
+  const footer = complimentary
+    ? `This optional invitation concerns complimentary product access. Disclose that access if the review service requires it. The private feedback link expires after 30 days. Need help? ${env.SUPPORT_EMAIL || 'Contact Runway Systems support.'}`
+    : `This invitation is sent consistently to verified buyers. The private feedback link expires after 30 days. Need help? ${env.SUPPORT_EMAIL || 'Contact Runway Systems support.'}`
   await sendBrevo(env, {
     to: request.email,
     from: env.EMAIL_FROM_INFO,
@@ -2348,6 +3663,105 @@ async function sendReviewEmail(env, request, settings) {
     ),
     text: `${prompt}\n\n${intro}\n\nIndependent Trustpilot review: ${trustpilotUrl}\n\nPrivate feedback: ${feedbackUrl}\n\n${footer}`,
   })
+}
+
+async function enqueueMarketingDeliveries(env, jobs) {
+  for (let offset = 0; offset < jobs.length; offset += 40) {
+    const chunk = jobs.slice(offset, offset + 40)
+    await env.DB.batch(chunk.map((job) => env.DB.prepare(`
+      INSERT OR IGNORE INTO marketing_deliveries (
+        id, campaign_id, kind, recipient_email, subject, html,
+        unsubscribe_url, waitlist_id, status, attempts, next_eligible_at,
+        created_at, updated_at, dedupe_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, '', ?, ?, ?)
+    `).bind(
+      job.id || makeId('marketing_delivery'),
+      job.campaignId || '',
+      job.kind,
+      job.email,
+      job.subject,
+      job.html,
+      job.unsubscribeUrl || '',
+      job.waitlistId || '',
+      job.createdAt || nowIso(),
+      job.createdAt || nowIso(),
+      job.dedupeKey,
+    )))
+  }
+}
+
+async function refreshCampaignDeliveryStatus(env, campaignId) {
+  if (!campaignId) return
+  const counts = await env.DB.prepare(`
+    SELECT COUNT(*) AS total,
+           SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+           SUM(CASE WHEN status = 'failed' AND attempts >= 5 THEN 1 ELSE 0 END) AS failed,
+           SUM(CASE WHEN status IN ('pending', 'sending') OR (status = 'failed' AND attempts < 5) THEN 1 ELSE 0 END) AS remaining
+    FROM marketing_deliveries WHERE campaign_id = ?
+  `).bind(campaignId).first()
+  const remaining = Number(counts?.remaining || 0)
+  await env.DB.prepare(`
+    UPDATE marketing_campaigns
+    SET sent_count = ?, failed_count = ?,
+        status = CASE WHEN ? = 0 THEN 'completed' ELSE 'sending' END,
+        completed_at = CASE WHEN ? = 0 THEN ? ELSE completed_at END
+    WHERE id = ?
+  `).bind(Number(counts?.sent || 0), Number(counts?.failed || 0), remaining, remaining, nowIso(), campaignId).run()
+}
+
+async function processMarketingQueue(env, limit = 20) {
+  const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+  const now = nowIso()
+  const rows = await env.DB.prepare(`
+    SELECT * FROM marketing_deliveries
+    WHERE (status = 'pending' OR (status = 'failed' AND attempts < 5) OR (status = 'sending' AND updated_at <= ?))
+      AND (next_eligible_at = '' OR next_eligible_at <= ?)
+    ORDER BY created_at ASC LIMIT ?
+  `).bind(staleBefore, now, limit).all()
+
+  for (const row of rows.results || []) {
+    const claimedAt = nowIso()
+    const claimed = await env.DB.prepare(`
+      UPDATE marketing_deliveries
+      SET status = 'sending', attempts = attempts + 1, last_error = NULL, updated_at = ?
+      WHERE id = ? AND attempts < 5
+        AND (status = 'pending' OR status = 'failed' OR (status = 'sending' AND updated_at <= ?))
+      RETURNING *
+    `).bind(claimedAt, row.id, staleBefore).first()
+    if (!claimed) continue
+    try {
+      await sendBrevo(env, {
+        to: claimed.recipient_email,
+        from: env.EMAIL_FROM_INFO,
+        fromName: 'Runway Systems',
+        subject: claimed.subject,
+        html: claimed.html,
+        idempotencyKey: claimed.dedupe_key,
+        headers: claimed.unsubscribe_url ? {
+          'List-Unsubscribe': `<${claimed.unsubscribe_url}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        } : {},
+      })
+      const sentAt = nowIso()
+      await env.DB.prepare(`
+        UPDATE marketing_deliveries
+        SET status = 'sent', sent_at = ?, updated_at = ?, next_eligible_at = '', last_error = NULL
+        WHERE id = ? AND status = 'sending'
+      `).bind(sentAt, sentAt, claimed.id).run()
+      if (claimed.waitlist_id) {
+        await env.DB.prepare('UPDATE product_waitlist SET notified_at = ? WHERE id = ?').bind(sentAt, claimed.waitlist_id).run()
+      }
+    } catch (error) {
+      const retrySeconds = Math.max(60, Number(error.retryAfterSeconds) || 60 * Math.max(1, claimed.attempts))
+      const next = new Date(Date.now() + retrySeconds * 1000).toISOString()
+      await env.DB.prepare(`
+        UPDATE marketing_deliveries
+        SET status = 'failed', last_error = ?, next_eligible_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'sending'
+      `).bind(redactPii(error?.message), next, nowIso(), claimed.id).run()
+    }
+    await refreshCampaignDeliveryStatus(env, claimed.campaign_id)
+  }
 }
 
 async function processEmailQueues(env) {
@@ -2369,9 +3783,19 @@ async function processEmailQueues(env) {
 
   const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString()
   const now = nowIso()
+  const pendingComplimentaryInvitations = await env.DB.prepare(`
+    SELECT id FROM complimentary_grants
+    WHERE status = 'pending' AND token_expires_at >= ?
+      AND (email_status IN ('pending', 'failed') OR (email_status = 'sending' AND updated_at <= ?))
+      AND email_attempts < 5
+      AND (email_next_eligible_at = '' OR email_next_eligible_at <= ?)
+    ORDER BY created_at ASC LIMIT 20
+  `).bind(now, staleBefore, now).all()
+  for (const grant of pendingComplimentaryInvitations.results || []) await deliverComplimentaryInvitation(env, grant.id)
+
   const pendingDeliveries = await env.DB.prepare(`
     SELECT * FROM purchases
-    WHERE payment_status = 'paid'
+    WHERE payment_status = 'paid' AND access_source = 'paid' AND access_status = 'active'
       AND (delivery_email_status IN ('pending', 'failed') OR (delivery_email_status = 'sending' AND updated_at <= ?))
       AND delivery_email_attempts < 5
       AND (delivery_email_next_eligible_at = '' OR delivery_email_next_eligible_at <= ?)
@@ -2397,7 +3821,7 @@ async function processEmailQueues(env) {
       WHERE id = ? AND attempts < 5
         AND (status IN ('pending', 'failed') OR (status = 'sending' AND updated_at <= ?))
         AND (next_eligible_at = '' OR next_eligible_at <= ?)
-        AND EXISTS (SELECT 1 FROM purchases WHERE purchases.id = review_requests.purchase_id AND purchases.payment_status = 'paid')
+        AND EXISTS (SELECT 1 FROM purchases WHERE purchases.id = review_requests.purchase_id AND purchases.payment_status = 'paid' AND purchases.access_status = 'active')
       RETURNING *
     `).bind(feedbackExpiresAt, claimedAt, request.id, staleBefore, claimedAt).first()
     if (!claimed) continue
@@ -2430,7 +3854,25 @@ async function processEmailQueues(env) {
     }
   }
 
-  await env.DB.prepare('DELETE FROM rate_limits WHERE expires_at < ?').bind(nowIso()).run()
+  await processMarketingQueue(env)
+  const expiredAt = nowIso()
+  const expiringComplimentary = await env.DB.prepare(`
+    SELECT DISTINCT recipient_email FROM complimentary_grants
+    WHERE status = 'pending' AND token_expires_at < ?
+  `).bind(expiredAt).all()
+  await env.DB.prepare(`
+    UPDATE complimentary_grants
+    SET status = 'expired', token_hash = NULL, token_ciphertext = NULL,
+        email_status = CASE WHEN email_status = 'sent' THEN 'sent' ELSE 'cancelled' END,
+        email_next_eligible_at = '', updated_at = ?
+    WHERE status = 'pending' AND token_expires_at < ?
+  `).bind(expiredAt, expiredAt).run()
+  for (const row of expiringComplimentary.results || []) {
+    await refreshComplimentaryAudienceForEmail(env, row.recipient_email)
+  }
+  await env.DB.prepare('DELETE FROM rate_limits WHERE expires_at < ?').bind(expiredAt).run()
+  await env.DB.prepare('DELETE FROM marketing_unsubscribe_tokens WHERE expires_at < ?').bind(nowIso()).run()
+  await env.DB.prepare('DELETE FROM waitlist_action_tokens WHERE expires_at < ?').bind(nowIso()).run()
 }
 
 function parseCheckoutProductKeys(custom) {
@@ -2471,22 +3913,56 @@ async function recordLemonOrder(env, data, eventKey, eventName, event = null) {
     if (!(await isKnownProductKey(env, productKey))) throw new HttpError(400, 'Lemon Squeezy order is not for a known product')
     items.push(productKey)
   }
-  if (!items.length) items.push(PRODUCT_KEY)
+  if (!items.length) throw new HttpError(400, 'Lemon Squeezy order is missing product metadata')
 
   const totalAmount = Number(attributes.total ?? attributes.subtotal ?? 0)
   const fallbackBase = Math.floor(totalAmount / items.length)
   const createdAt = attributes.created_at ? new Date(attributes.created_at).toISOString() : nowIso()
   const updatedAt = nowIso()
   const reviewSendAt = new Date(new Date(createdAt).getTime() + REVIEW_DELAY_MS).toISOString()
-  // Look up the consent recorded when this checkout was created so the
-  // purchase itself carries proof. Matched on the Lemon Squeezy checkout id
-  // when present, else the most recent consent from this buyer.
+  // Correlate consent exactly through our random consent id (included in
+  // checkout custom data), with provider checkout id as a compatibility
+  // fallback. Never attach an arbitrary "most recent" agreement to an order.
   const checkoutId = String(attributes.checkout_id || attributes.first_order_item?.checkout_id || '')
-  const consentRow = checkoutId
-    ? await env.DB.prepare('SELECT created_at, policy_version FROM checkout_consents WHERE checkout_id = ? ORDER BY created_at DESC LIMIT 1').bind(checkoutId).first()
-    : await env.DB.prepare('SELECT created_at, policy_version FROM checkout_consents WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').bind(userId).first()
+  const consentId = String(custom.consent_id || '').trim()
+  const consentRow = consentId
+    ? await env.DB.prepare('SELECT created_at, policy_version, checkout_id, customer_email, product_keys, bundle_key FROM checkout_consents WHERE id = ? AND user_id = ? LIMIT 1').bind(consentId, userId).first()
+    : (checkoutId
+        ? await env.DB.prepare('SELECT created_at, policy_version, checkout_id, customer_email, product_keys, bundle_key FROM checkout_consents WHERE checkout_id = ? AND user_id = ? LIMIT 1').bind(checkoutId, userId).first()
+        : null)
   const consentAt = consentRow?.created_at || ''
   const consentPolicyVersion = consentRow?.policy_version || ''
+  const resolvedCheckoutId = checkoutId || consentRow?.checkout_id || ''
+  if (!consentRow) throw new HttpError(400, 'Order does not match an authenticated checkout session')
+  if (consentRow.customer_email && String(consentRow.customer_email).trim().toLowerCase() !== email) {
+    throw new HttpError(400, 'Order email does not match the checkout session')
+  }
+  if (checkoutId && consentRow.checkout_id && checkoutId !== String(consentRow.checkout_id)) {
+    throw new HttpError(400, 'Order checkout identifier does not match')
+  }
+  const consentedKeys = parseStringList(consentRow.product_keys).sort()
+  if (consentedKeys.join(',') !== [...items].sort().join(',')) {
+    throw new HttpError(400, 'Order products do not match the authenticated checkout session')
+  }
+
+  let expectedSubtotal = 0
+  const expectedCurrencies = new Set()
+  for (const productKey of items) {
+    const product = await resolveProductConfig(env, productKey)
+    if (!Number.isInteger(product.priceCents) || product.priceCents <= 0) throw new HttpError(503, 'Authoritative product pricing is incomplete')
+    expectedSubtotal += product.priceCents
+    expectedCurrencies.add(product.currency)
+  }
+  if (consentRow.bundle_key) {
+    const bundleRow = await env.DB.prepare('SELECT discount_percent FROM bundles WHERE key = ?').bind(consentRow.bundle_key).first()
+    if (!bundleRow) throw new HttpError(400, 'Order bundle is no longer recognized')
+    expectedSubtotal = Math.round(expectedSubtotal * (100 - Number(bundleRow.discount_percent || 0)) / 100)
+  }
+  const actualSubtotal = Number(attributes.subtotal ?? attributes.total ?? 0)
+  const actualCurrency = String(attributes.currency || 'usd').toUpperCase()
+  if (expectedCurrencies.size !== 1 || [...expectedCurrencies][0] !== actualCurrency || actualSubtotal !== expectedSubtotal) {
+    throw new HttpError(400, 'Order amount or currency does not match authoritative checkout pricing')
+  }
 
   const firstItem = attributes.first_order_item || {}
   const variantId = String(firstItem.variant_id || '')
@@ -2501,10 +3977,10 @@ async function recordLemonOrder(env, data, eventKey, eventName, event = null) {
         id, order_identifier, user_id, customer_email, customer_name,
         variant_id, amount_total, currency, payment_status, product_key,
         delivery_email_status, delivery_email_attempts, created_at, updated_at,
-        consent_at, consent_policy_version, delivery_email_next_eligible_at
+        consent_at, consent_policy_version, delivery_email_next_eligible_at, checkout_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?,
         CASE WHEN EXISTS (SELECT 1 FROM revoked_orders WHERE order_identifier = ?) THEN 'refunded' ELSE 'paid' END,
-        ?, 'pending', 0, ?, ?, ?, ?, '')
+        ?, 'pending', 0, ?, ?, ?, ?, '', ?)
       ON CONFLICT(order_identifier, product_key) DO UPDATE SET
         user_id = excluded.user_id,
         customer_email = excluded.customer_email,
@@ -2512,6 +3988,7 @@ async function recordLemonOrder(env, data, eventKey, eventName, event = null) {
         variant_id = excluded.variant_id,
         amount_total = excluded.amount_total,
         currency = excluded.currency,
+        checkout_id = CASE WHEN excluded.checkout_id != '' THEN excluded.checkout_id ELSE purchases.checkout_id END,
         payment_status = CASE
           WHEN purchases.payment_status = 'refunded'
             OR EXISTS (SELECT 1 FROM revoked_orders WHERE order_identifier = excluded.order_identifier)
@@ -2533,30 +4010,30 @@ async function recordLemonOrder(env, data, eventKey, eventName, event = null) {
       updatedAt,
       consentAt,
       consentPolicyVersion,
+      resolvedCheckoutId,
     ))
     statements.push(env.DB.prepare(`
       INSERT INTO review_requests (
         id, purchase_id, user_id, email, customer_name, send_at, status, attempts, created_at, updated_at, next_eligible_at
       )
       SELECT ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ''
-      WHERE EXISTS (SELECT 1 FROM purchases WHERE id = ? AND payment_status = 'paid')
+      WHERE EXISTS (SELECT 1 FROM purchases WHERE id = ? AND payment_status = 'paid' AND access_status = 'active')
       ON CONFLICT(purchase_id) DO NOTHING
     `).bind(makeId('review_request'), purchaseId, userId, email, String(attributes.user_name || ''), reviewSendAt, updatedAt, updatedAt, purchaseId))
   }
   statements.push(env.DB.prepare('INSERT OR IGNORE INTO processed_webhooks (event_id, event_type, processed_at) VALUES (?, ?, ?)').bind(eventKey, eventName, updatedAt))
   await env.DB.batch(statements)
 
-  for (const productKey of items) {
-    await recordAudienceContact(env, {
-      email,
-      userId,
-      name: String(attributes.user_name || '').trim(),
-      source: 'checkout',
-      isCustomer: true,
-      spendCents: totalAmount,
-      productKey,
-    })
-  }
+  await recordAudienceContact(env, {
+    email,
+    userId,
+    name: String(attributes.user_name || '').trim(),
+    source: 'checkout',
+    isCustomer: true,
+    spendCents: totalAmount,
+    productKeys: items,
+    orderIncrement: 1,
+  })
 
   const rows = []
   for (const productKey of items) {
@@ -2573,7 +4050,7 @@ async function recordLemonRefund(env, data, eventKey, eventName) {
   if (!identifier) throw new HttpError(400, 'Lemon Squeezy refund is missing the order identifier')
   await env.DB.batch([
     env.DB.prepare('INSERT OR IGNORE INTO revoked_orders (order_identifier, refunded_at) VALUES (?, ?)').bind(identifier, updatedAt),
-    env.DB.prepare('UPDATE purchases SET payment_status = ?, updated_at = ? WHERE order_identifier = ?').bind('refunded', updatedAt, identifier),
+    env.DB.prepare('UPDATE purchases SET payment_status = ?, access_status = ?, updated_at = ? WHERE order_identifier = ? AND access_source = ?').bind('refunded', 'revoked', updatedAt, identifier, 'paid'),
     env.DB.prepare(`
       UPDATE review_requests SET status = 'cancelled', updated_at = ?
       WHERE purchase_id IN (SELECT id FROM purchases WHERE order_identifier = ?) AND status != 'sent'
@@ -2584,7 +4061,7 @@ async function recordLemonRefund(env, data, eventKey, eventName) {
 
 async function handleLemonSqueezyWebhook(request, env, ctx) {
   if (!env.LEMONSQUEEZY_WEBHOOK_SECRET) throw new HttpError(503, 'Lemon Squeezy webhook verification is not configured')
-  const rawBody = await request.text()
+  const rawBody = await readBodyTextBounded(request, JSON_BODY_MAX_LENGTH, 'Webhook')
   const signature = String(request.headers.get('X-Signature') || '').toLowerCase()
   if (!signature || !/^[a-f0-9]{64}$/.test(signature)) throw new HttpError(400, 'Invalid Lemon Squeezy signature')
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.LEMONSQUEEZY_WEBHOOK_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
@@ -2643,10 +4120,11 @@ async function handleLemonSqueezyWebhook(request, env, ctx) {
         } catch (error) {
           if (error instanceof HttpError) throw error
           logEvent('warn', 'webhook_user_lookup_error', { error: error?.message })
+          throw new HttpError(503, 'Account ownership verification is temporarily unavailable')
         }
       }
     } else {
-      logEvent('warn', 'webhook_ownership_check_skipped', { reason: 'SUPABASE_SERVICE_ROLE_KEY not set' })
+      throw new HttpError(503, 'Webhook account ownership verification is not configured')
     }
     const purchases = await recordLemonOrder(env, event.data, eventKey, eventName, event)
     for (const purchase of purchases) {
@@ -2672,7 +4150,7 @@ async function getAccountPurchases(env, user) {
   }
   const result = await env.DB.prepare(`
     SELECT * FROM purchases
-    WHERE user_id = ? AND payment_status = 'paid'
+    WHERE user_id = ? AND payment_status = 'paid' AND access_status = 'active'
     ORDER BY created_at DESC
   `).bind(user.id).all()
   const productInfo = await productInfoMap(env)
@@ -2685,6 +4163,40 @@ async function getAccountPurchases(env, user) {
 async function deleteAccountData(env, user) {
   const updatedAt = nowIso()
 
+  // Invalidate unclaimed invitations and anonymize claimed grant provenance.
+  // Grant/item rows may remain for aggregate operational accounting, but no
+  // reusable token, recipient email, or Supabase identifier survives.
+  await env.DB.prepare(`
+    UPDATE complimentary_grant_items
+    SET item_status = CASE WHEN item_status = 'granted' THEN 'revoked' ELSE item_status END
+    WHERE grant_id IN (
+      SELECT id FROM complimentary_grants WHERE recipient_email = ? OR claimed_by_user_id = ?
+    )
+  `).bind(user.email || '', user.id).run()
+  await env.DB.prepare(`
+    UPDATE complimentary_grants
+    SET recipient_email = 'deleted:' || id,
+        recipient_email_hash = '',
+        status = CASE WHEN status = 'pending' THEN 'cancelled' WHEN status = 'claimed' THEN 'revoked' ELSE status END,
+        revoked_at = CASE WHEN status = 'claimed' THEN ? ELSE revoked_at END,
+        token_hash = NULL,
+        token_ciphertext = NULL,
+        claimed_by_user_id = CASE WHEN claimed_by_user_id = ? THEN 'deleted:' || id ELSE claimed_by_user_id END,
+        email_status = CASE WHEN email_status = 'sent' THEN 'sent' ELSE 'cancelled' END,
+        email_next_eligible_at = '',
+        updated_at = ?
+    WHERE recipient_email = ? OR claimed_by_user_id = ?
+  `).bind(updatedAt, user.id, updatedAt, user.email || '', user.id).run()
+  await env.DB.prepare(`
+    UPDATE complimentary_grants
+    SET created_by_user_id = 'deleted:' || id, updated_at = ?
+    WHERE created_by_user_id = ?
+  `).bind(updatedAt, user.id).run()
+  await env.DB.prepare("UPDATE blog_posts SET created_by_user_id = 'deleted:' || id WHERE created_by_user_id = ?").bind(user.id).run()
+  await env.DB.prepare("UPDATE blog_media SET created_by_user_id = 'deleted:' || id WHERE created_by_user_id = ?").bind(user.id).run()
+  await env.DB.prepare("UPDATE blog_post_revisions SET created_by_user_id = 'deleted:' || id WHERE created_by_user_id = ?").bind(user.id).run()
+  await env.DB.prepare("UPDATE blog_slug_redirects SET created_by_user_id = 'deleted:' || post_id WHERE created_by_user_id = ?").bind(user.id).run()
+
   // Purchases: detach ownership and clear email and name. Order
   // identifiers stay for refund revocation, and amount/currency stay for
   // aggregate reporting.
@@ -2693,34 +4205,100 @@ async function deleteAccountData(env, user) {
     SET user_id = 'deleted:' || id,
         customer_email = '',
         customer_name = '',
+        access_status = CASE WHEN access_source = 'complimentary' THEN 'revoked' ELSE access_status END,
+        delivery_email_status = CASE WHEN delivery_email_status = 'sent' THEN 'sent' ELSE 'failed' END,
+        delivery_email_attempts = CASE WHEN delivery_email_status = 'sent' THEN delivery_email_attempts ELSE 5 END,
+        delivery_email_last_error = CASE WHEN delivery_email_status = 'sent' THEN delivery_email_last_error ELSE 'Account deleted' END,
+        delivery_email_next_eligible_at = '',
         updated_at = ?
     WHERE user_id = ?
   `).bind(updatedAt, user.id).run()
 
   // Review requests hold delivery email addresses: delete outright.
-  await env.DB.prepare('DELETE FROM review_requests WHERE user_id = ?').bind(user.id).run()
+  await env.DB.prepare('DELETE FROM review_requests WHERE user_id = ? OR email = ?').bind(user.id, user.email || '').run()
 
-  // Marketing audience contacts: remove personal identifiers
-  try {
-    await env.DB.prepare('DELETE FROM audience_contacts WHERE user_id = ? OR email = ?').bind(user.id, user.email || '').run()
-  } catch {}
+  // A deletion request also suppresses optional marketing so a future login
+  // cannot silently recreate a subscribed contact.
+  if (user.email) await suppressMarketingEmail(env, user.email, 'account_deletion')
+  await env.DB.prepare('DELETE FROM audience_contacts WHERE user_id = ? OR email = ?').bind(user.id, user.email || '').run()
+  await env.DB.prepare('DELETE FROM marketing_unsubscribe_tokens WHERE email = ?').bind(user.email || '').run()
+  await env.DB.prepare('DELETE FROM newsletter_confirmations WHERE email = ?').bind(user.email || '').run()
+  await env.DB.prepare(`
+    UPDATE marketing_deliveries
+    SET recipient_email = 'deleted:' || id,
+        unsubscribe_url = '',
+        status = CASE WHEN status = 'sent' THEN 'sent' ELSE 'failed' END,
+        attempts = CASE WHEN status = 'sent' THEN attempts ELSE 5 END,
+        last_error = CASE WHEN status = 'sent' THEN last_error ELSE 'Account deleted' END,
+        next_eligible_at = '',
+        updated_at = ?
+    WHERE recipient_email = ?
+  `).bind(updatedAt, user.email || '').run()
 
-  // Testimonials: withdraw from public display and clear name and text.
+  // Remove waitlist records outright; otherwise a deleted account could still
+  // receive a later product-launch email.
+  await env.DB.prepare(`
+    DELETE FROM waitlist_action_tokens
+    WHERE waitlist_id IN (SELECT id FROM product_waitlist WHERE user_id = ? OR email = ?)
+  `).bind(user.id, user.email || '').run()
+  await env.DB.prepare('DELETE FROM product_waitlist WHERE user_id = ? OR email = ?').bind(user.id, user.email || '').run()
+
+  // Keep the fact/version of purchase consent where legally necessary, but
+  // remove both direct identifiers and replace the user id with a row-local
+  // non-correlatable marker.
+  await env.DB.prepare(`
+    UPDATE checkout_consents
+    SET user_id = 'deleted:' || id, customer_email = ''
+    WHERE user_id = ? OR customer_email = ?
+  `).bind(user.id, user.email || '').run()
+
+  // Testimonials: withdraw from public display, clear content, and remove the
+  // reusable account identifier while preserving an anonymous aggregate row.
   await env.DB.prepare(`
     UPDATE testimonials
-    SET name = '', text = '', status = 'rejected', moderated_at = ?
+    SET user_id = 'deleted:' || id, name = '', text = '', status = 'rejected', moderated_at = ?
     WHERE user_id = ?
   `).bind(updatedAt, user.id).run()
 
-  // Feedback: clear free text; keep the numeric rating for aggregate
-  // averages only.
-  await env.DB.prepare('UPDATE feedback SET text = \'\' WHERE user_id = ?').bind(user.id).run()
+  // Feedback keeps only the numeric rating for aggregate statistics.
+  await env.DB.prepare(`
+    UPDATE feedback SET user_id = 'deleted:' || id, text = '' WHERE user_id = ?
+  `).bind(user.id).run()
 
-  // Rate-limit rows keyed by the user id.
-  await env.DB.prepare('DELETE FROM rate_limits WHERE key LIKE ?').bind(`%:${user.id}:%`).run()
+  // Scrub references to this user from mutations performed by somebody else,
+  // then remove rows where the deleted user was the actor. Audit `details` is
+  // free-form JSON, so keeping those actor rows would not be anonymization.
+  await env.DB.prepare(`
+    UPDATE admin_audit_log
+    SET details = replace(replace(details, ?, '[deleted]'), ?, '[deleted]'),
+        entity_id = CASE WHEN entity_id = ? OR entity_id = ? THEN '[deleted]' ELSE entity_id END
+    WHERE instr(details, ?) > 0 OR instr(details, ?) > 0 OR entity_id = ? OR entity_id = ?
+  `).bind(user.email || '', user.id, user.id, user.email || '', user.email || '', user.id, user.id, user.email || '').run()
+  await env.DB.prepare('DELETE FROM admin_audit_log WHERE subject_id = ? OR subject_email = ?').bind(user.id, user.email || '').run()
 
   await invalidatePublicCaches()
-  return { deleted: true, purchasesDetached: Number(purchasesResult.meta?.changes || 0) }
+
+  // Remove the authentication identity as the final step. D1 cleanup is
+  // already durable if the provider is temporarily unavailable; returning an
+  // error lets the signed-in user retry while their current session remains.
+  const authBase = String(env.SUPABASE_URL || '').replace(/\/$/, '')
+  let identityResponse
+  try {
+    identityResponse = await fetch(`${authBase}/auth/v1/admin/users/${encodeURIComponent(user.id)}`, {
+      method: 'DELETE',
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+      signal: AbortSignal.timeout(5000),
+    })
+  } catch {
+    throw new HttpError(503, 'Storefront data was removed, but authentication deletion must be retried')
+  }
+  if (!identityResponse.ok && identityResponse.status !== 404) {
+    throw new HttpError(502, 'Storefront data was removed, but authentication deletion must be retried')
+  }
+  return { deleted: true, identityDeleted: true, purchasesDetached: Number(purchasesResult.meta?.changes || 0) }
 }
 
 async function getApprovedTestimonials(env) {
@@ -2781,18 +4359,30 @@ function monthBuckets(count = 8) {
 }
 
 async function getAnalytics(env) {
-  const [sales, views, reviews, revenueByMonth, viewsByMonth] = await Promise.all([
-    env.DB.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(amount_total), 0) AS revenue FROM purchases WHERE payment_status = 'paid'`).first(),
+  const [sales, views, reviews, revenueByMonth, viewsByMonth, complimentary] = await Promise.all([
+    env.DB.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(amount_total), 0) AS revenue FROM purchases WHERE payment_status = 'paid' AND access_source = 'paid' AND access_status = 'active'`).first(),
     env.DB.prepare('SELECT COALESCE(SUM(page_views), 0) AS total FROM daily_metrics').first(),
-    env.DB.prepare('SELECT COUNT(DISTINCT purchase_id) AS total, COALESCE(AVG(rating), 0) AS average FROM feedback').first(),
+    env.DB.prepare(`
+      SELECT COUNT(DISTINCT CASE WHEN p.access_source = 'paid' THEN f.purchase_id END) AS total,
+             COALESCE(AVG(f.rating), 0) AS average
+      FROM feedback f JOIN purchases p ON p.id = f.purchase_id
+      WHERE p.access_status = 'active'
+    `).first(),
+
     env.DB.prepare(`
       SELECT substr(created_at, 1, 7) AS month, COALESCE(SUM(amount_total), 0) AS revenue, COUNT(*) AS sales
-      FROM purchases WHERE payment_status = 'paid' GROUP BY month
+      FROM purchases WHERE payment_status = 'paid' AND access_source = 'paid' AND access_status = 'active' GROUP BY month
     `).all(),
     env.DB.prepare(`
       SELECT substr(date, 1, 7) AS month, COALESCE(SUM(page_views), 0) AS views
       FROM daily_metrics GROUP BY month
     `).all(),
+    env.DB.prepare(`
+      SELECT COUNT(DISTINCT recipient_email) AS total,
+             COUNT(DISTINCT CASE WHEN status = 'claimed' THEN recipient_email END) AS claimed,
+             COUNT(DISTINCT CASE WHEN status = 'pending' THEN recipient_email END) AS pending
+      FROM complimentary_grants WHERE status IN ('pending', 'claimed')
+    `).first(),
   ])
   const totalSales = Number(sales?.total || 0)
   const pageViews = Number(views?.total || 0)
@@ -2803,6 +4393,9 @@ async function getAnalytics(env) {
   return {
     totalSales,
     revenue: Number(sales?.revenue || 0) / 100,
+    complimentaryCustomers: Number(complimentary?.total || 0),
+    complimentaryClaimed: Number(complimentary?.claimed || 0),
+    complimentaryPending: Number(complimentary?.pending || 0),
     conversionRate: pageViews ? Number(((totalSales / pageViews) * 100).toFixed(1)) : 0,
     pageViews,
     averageRating: Number(Number(reviews?.average || 0).toFixed(1)),
@@ -2839,6 +4432,7 @@ async function trackPageView(request, env) {
 // (pruned by the cron tick). The source IP is only kept as a salted hash.
 const CLIENT_ERROR_KINDS = new Set(['render', 'error', 'unhandledrejection'])
 const CLIENT_ERROR_RETENTION_DAYS = 30
+const ADMIN_AUDIT_RETENTION_DAYS = 365
 
 async function handleClientErrorEvent(request, env) {
   await rateLimit(request, env, 'client-error', 30, 3600)
@@ -2896,6 +4490,7 @@ async function handleRequest(request, env, ctx) {
   if (!env.DB) throw new HttpError(503, 'D1 database is not configured')
   const url = new URL(request.url)
   const path = url.pathname.replace(/\/+$/, '') || '/'
+  let match = null
 
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { ...corsHeaders(request, env), ...SECURITY_HEADERS } })
   if (path === '/health' && request.method === 'GET') {
@@ -2913,6 +4508,7 @@ async function handleRequest(request, env, ctx) {
         trustpilotBusinessUrl: settings.trustpilotBusinessUrl,
         trustpilotBusinessUnitId: settings.trustpilotBusinessUnitId || '',
         supportEmail: settings.supportEmail || '',
+        infoEmail: env.EMAIL_FROM_INFO || '',
         suiteContent: settings.suiteContent || {},
         policies: settings.policies || {},
         announcement: { ...(settings.announcement || {}), active: Boolean(settings.announcement?.message && settings.announcement?.active) },
@@ -2922,16 +4518,58 @@ async function handleRequest(request, env, ctx) {
     })
     return json(request, env, JSON.parse(bodyText), 200, { 'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600' })
   }
+  if (path === '/blog/posts' && request.method === 'GET') {
+    const result = await listPublicBlogPosts(env, {
+      limit: url.searchParams.get('limit'), cursor: cleanText(url.searchParams.get('cursor') || '', 40, 'Cursor', { required: false }),
+      category: cleanText(url.searchParams.get('category') || '', 80, 'Category', { required: false }),
+      tag: cleanText(url.searchParams.get('tag') || '', 80, 'Tag', { required: false }),
+      search: cleanText(url.searchParams.get('search') || '', 100, 'Search', { required: false }),
+    })
+    return json(request, env, result, 200, { 'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600' })
+  }
+  if (path === '/blog/categories' && request.method === 'GET') {
+    return json(request, env, { categories: await listBlogCategories(env) }, 200, { 'Cache-Control': 'public, max-age=300, s-maxage=900' })
+  }
+  if (path === '/blog/feed.xml' && request.method === 'GET') {
+    const body = await getCachedPublic('blog-rss', 60, () => blogRssXml(env))
+    return new Response(body, { headers: { 'Content-Type': 'application/rss+xml; charset=utf-8', ...SECURITY_HEADERS, 'Cache-Control': 'public, max-age=60, s-maxage=300' } })
+  }
+  if ((path === '/llms.txt' || path === '/llms-full.txt') && request.method === 'GET') {
+    const full = path === '/llms-full.txt'
+    const body = await getCachedPublic(full ? 'blog-llms-full' : 'blog-llms', 60, () => blogLlmsText(env, { full }))
+    return new Response(body, { headers: { 'Content-Type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS, 'Cache-Control': 'public, max-age=60, s-maxage=300' } })
+  }
+  match = routeMatch(path, /^\/blog\/posts\/([a-z0-9]+(?:-[a-z0-9]+)*)$/)
+  if (match && request.method === 'GET') {
+    const result = await getPublicBlogPost(env, match[1])
+    return json(request, env, result, 200, { 'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600' })
+  }
+  match = routeMatch(path, /^\/blog-media\/([a-f0-9-]{36})\/([a-f0-9]{8}\.(?:png|jpe?g|webp))$/)
+  if (match && request.method === 'GET') {
+    if (!env.MEDIA) throw new HttpError(503, 'Media storage is not configured')
+    const publicPath = `/blog-media/${match[1]}/${match[2]}`
+    const media = await env.DB.prepare("SELECT * FROM blog_media WHERE id = ? AND public_path = ? AND status = 'ready' AND deleted_at IS NULL").bind(match[1], publicPath).first()
+    if (!media) throw new HttpError(404, 'Media not found')
+    const object = await env.MEDIA.get(media.r2_key)
+    if (!object) throw new HttpError(404, 'Media not found')
+    const headers = new Headers({ ...corsHeaders(request, env), ...SECURITY_HEADERS, 'Cache-Control': 'public, max-age=31536000, immutable' })
+    object.writeHttpMetadata(headers)
+    return new Response(object.body, { status: 200, headers })
+  }
   if (path === '/sitemap.xml' && request.method === 'GET') {
-    const origin = getPrimaryOrigin(env)
-    const products = await getActiveProducts(env)
-    const escapeXml = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
-    const urls = [
-      `<url><loc>${escapeXml(origin)}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>`,
-      `<url><loc>${escapeXml(origin)}/terms</loc><changefreq>monthly</changefreq><priority>0.4</priority></url>`,
-      ...products.map((product) => `<url><loc>${escapeXml(origin)}/products/${escapeXml(product.key)}</loc>${product.updatedAt ? `<lastmod>${escapeXml(product.updatedAt.slice(0, 10))}</lastmod>` : ''}<changefreq>weekly</changefreq><priority>0.9</priority></url>`),
-    ]
-    const xml = await getCachedPublic('sitemap', 60, async () => `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n${urls.join('\n')}\n</urlset>`)
+    const xml = await getCachedPublic('sitemap', 60, async () => {
+      const origin = getPrimaryOrigin(env)
+      const [products, blogPosts] = await Promise.all([getActiveProducts(env), blogSitemapRows(env)])
+      const escapeXml = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
+      const urls = [
+        `<url><loc>${escapeXml(origin)}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>`,
+        `<url><loc>${escapeXml(origin)}/terms</loc><changefreq>monthly</changefreq><priority>0.4</priority></url>`,
+        `<url><loc>${escapeXml(origin)}/blog</loc><changefreq>weekly</changefreq><priority>0.8</priority></url>`,
+        ...products.map((product) => `<url><loc>${escapeXml(origin)}/products/${escapeXml(product.key)}</loc>${product.updatedAt ? `<lastmod>${escapeXml(product.updatedAt.slice(0, 10))}</lastmod>` : ''}<changefreq>weekly</changefreq><priority>0.9</priority></url>`),
+        ...blogPosts.map((post) => `<url><loc>${escapeXml(origin)}/blog/${escapeXml(post.slug)}</loc><lastmod>${escapeXml(post.updated_at.slice(0, 10))}</lastmod><changefreq>monthly</changefreq><priority>0.7</priority></url>`),
+      ]
+      return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join('\n')}\n</urlset>`
+    })
     return new Response(xml, {
       status: 200,
       headers: { 'Content-Type': 'application/xml; charset=utf-8', ...SECURITY_HEADERS, 'Cache-Control': 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400' },
@@ -2948,6 +4586,15 @@ async function handleRequest(request, env, ctx) {
   if (path === '/testimonials' && request.method === 'GET') {
     const bodyText = await getCachedPublic('testimonials', 60, async () => JSON.stringify(await getApprovedTestimonials(env)))
     return json(request, env, JSON.parse(bodyText), 200, { 'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600' })
+  }
+
+  if (path === '/newsletter/subscribe' && request.method === 'POST') {
+    const result = await requestNewsletterConfirmation(request, env, await readJson(request))
+    return json(request, env, result, 202, { 'Cache-Control': 'no-store' })
+  }
+  if (path === '/newsletter/confirm' && request.method === 'POST') {
+    const result = await confirmNewsletterSubscription(request, env, await readJson(request))
+    return json(request, env, result, 200, { 'Cache-Control': 'no-store' })
   }
 
   if (path === '/waitlist/subscribe' && request.method === 'POST') {
@@ -2967,6 +4614,13 @@ async function handleRequest(request, env, ctx) {
       throw new HttpError(400, 'This product is not currently accepting waitlist signups')
     }
 
+    const user = await authenticate(request, env).catch(() => null)
+    // Identity is derived only from a verified optional bearer token. Never
+    // accept a client-supplied Supabase user id on a public endpoint.
+    const userId = user?.id || ''
+    const source = cleanText(body.source, 40, 'Source', { required: false }) || 'product_page'
+    const marketingOptIn = body.marketingOptIn === true
+
     let existing = null
     try {
       existing = await env.DB.prepare('SELECT id, welcome_sent_at FROM product_waitlist WHERE product_key = ? AND email = ?').bind(productKey, email).first()
@@ -2976,10 +4630,6 @@ async function handleRequest(request, env, ctx) {
     const createdAt = nowIso()
 
     if (!existing) {
-      const user = await authenticate(request, env).catch(() => null)
-      const userId = user?.id || cleanText(body.userId, 100, 'User ID', { required: false }) || ''
-      const source = cleanText(body.source, 40, 'Source', { required: false }) || 'product_page'
-
       try {
         await env.DB.prepare(`
           INSERT INTO product_waitlist (id, product_key, email, user_id, source, created_at)
@@ -3014,20 +4664,40 @@ async function handleRequest(request, env, ctx) {
         }
       }
 
-      await recordAudienceContact(env, {
-        email,
-        userId,
-        name: user?.user_metadata?.full_name || user?.user_metadata?.name || '',
-        avatarUrl: user?.user_metadata?.avatar_url || user?.user_metadata?.picture || '',
-        source: 'waitlist',
-        waitlistKey: productKey,
-      })
+    } else if (userId) {
+      await env.DB.prepare("UPDATE product_waitlist SET user_id = ? WHERE id = ? AND user_id = ''").bind(userId, waitlistId).run()
+    }
+
+    await recordAudienceContact(env, {
+      email,
+      userId,
+      name: user?.user_metadata?.full_name || user?.user_metadata?.name || '',
+      avatarUrl: user?.user_metadata?.avatar_url || user?.user_metadata?.picture || '',
+      source: 'waitlist',
+      waitlistKey: productKey,
+      marketingOptIn,
+      marketingOptInSource: 'waitlist_checkbox',
+    })
+
+    let pollToken = ''
+    if (product.waitlistConfig?.pollEnabled) {
+      pollToken = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(24)))
+      await env.DB.prepare(`
+        INSERT INTO waitlist_action_tokens (token_hash, waitlist_id, expires_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(token_hash) DO NOTHING
+      `).bind(
+        await sha256Hex(pollToken),
+        waitlistId,
+        new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      ).run()
     }
 
     return json(request, env, {
       ok: true,
       message: "You're on the early access list! We will notify you when it launches.",
       poll: product.waitlistConfig?.pollEnabled ? {
+        token: pollToken,
         question: product.waitlistConfig.pollQuestion || 'Which feature is most critical for your business?',
         options: Array.isArray(product.waitlistConfig.pollOptions) && product.waitlistConfig.pollOptions.length
           ? product.waitlistConfig.pollOptions
@@ -3039,14 +4709,22 @@ async function handleRequest(request, env, ctx) {
   if (path === '/waitlist/poll-vote' && request.method === 'POST') {
     const body = await readJson(request)
     const productKey = cleanText(body.productKey, 60, 'Product key')
-    const email = cleanText(body.email, 254, 'Email').toLowerCase().trim()
+    const token = cleanText(body.token, 100, 'Poll token')
     const vote = cleanText(body.vote, 200, 'Poll vote')
-    await rateLimit(request, env, 'waitlist-vote', 30, 3600, email)
+    await rateLimit(request, env, 'waitlist-vote', 30, 3600, token)
 
-    try {
-      await env.DB.prepare('UPDATE product_waitlist SET poll_response = ? WHERE product_key = ? AND email = ?')
-        .bind(vote, productKey, email).run()
-    } catch { /* table may not be migrated */ }
+    const action = await env.DB.prepare(`
+      DELETE FROM waitlist_action_tokens
+      WHERE token_hash = ? AND expires_at >= ?
+      RETURNING waitlist_id
+    `).bind(await sha256Hex(token), nowIso()).first()
+    if (!action) throw new HttpError(401, 'This waitlist poll link is invalid or expired')
+    const updated = await env.DB.prepare(`
+      UPDATE product_waitlist SET poll_response = ?
+      WHERE id = ? AND product_key = ?
+      RETURNING id
+    `).bind(vote, action.waitlist_id, productKey).first()
+    if (!updated) throw new HttpError(404, 'Waitlist signup not found')
 
     return json(request, env, { ok: true, message: 'Thank you for your feedback!' }, 200)
   }
@@ -3066,41 +4744,60 @@ async function handleRequest(request, env, ctx) {
   }
 
   if (path === '/unsubscribe' && request.method === 'GET') {
-    const email = cleanText(url.searchParams.get('email') || '', 254, 'Email', { required: false }).toLowerCase()
-    if (email) {
-      try {
-        await env.DB.prepare("UPDATE audience_contacts SET status = 'unsubscribed' WHERE email = ?").bind(email).run()
-      } catch {}
-    }
+    const token = cleanText(url.searchParams.get('token') || '', 100, 'Token', { required: false })
+    const valid = Boolean(token && await emailForUnsubscribeToken(env, token))
     const origin = getPrimaryOrigin(env)
-    const html = `<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Unsubscribed · Runway Systems</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;background:#0a0c10;color:#f4f1e9;font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px">
-<div style="max-width:480px;background:#11141a;border:1px solid #242933;border-radius:16px;padding:36px;text-align:center">
-<div style="color:#c9a227;font-size:12px;font-weight:700;letter-spacing:2px;margin-bottom:12px">RUNWAY SYSTEMS</div>
-<h1 style="font-size:24px;margin:0 0 16px 0">Unsubscribed</h1>
-<p style="color:#a9afba;font-size:15px;line-height:1.6;margin-bottom:24px">You have been successfully removed from our marketing broadcast list. Essential purchase delivery emails will still reach your inbox.</p>
-<a href="${origin}" style="display:inline-block;background:#c9a227;color:#0a0c10;text-decoration:none;font-weight:700;padding:12px 24px;border-radius:8px">Return to Storefront</a>
-</div>
-</body></html>`
-    return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...SECURITY_HEADERS } })
+    const title = valid ? 'Confirm unsubscribe' : 'Invalid unsubscribe link'
+    const content = valid
+      ? `<p>This removes you from optional Runway Systems marketing. Purchase delivery and security emails are unaffected.</p>
+         <form method="post" action="/unsubscribe?token=${encodeURIComponent(token)}"><button type="submit">Unsubscribe</button></form>`
+      : '<p>This link is invalid or expired. Contact support if you still receive optional marketing.</p>'
+    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title} · Runway Systems</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;background:#0a0c10;color:#f4f1e9;font:16px/1.6 Arial,sans-serif;display:grid;place-items:center;min-height:100vh;padding:24px}.card{max-width:520px;background:#11141a;border:1px solid #2b3039;border-radius:16px;padding:36px;text-align:center}p{color:#a9afba}button,a{display:inline-block;border:0;border-radius:8px;padding:12px 22px;background:#c9a227;color:#0a0c10;font-weight:700;text-decoration:none;cursor:pointer}</style></head><body><main class="card"><small>RUNWAY SYSTEMS</small><h1>${title}</h1>${content}<p><a href="${escapeHtml(origin)}">Return to storefront</a></p></main></body></html>`
+    return new Response(html, { headers: { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" } })
+  }
+
+  if (path === '/unsubscribe' && request.method === 'POST') {
+    const token = cleanText(url.searchParams.get('token') || '', 100, 'Token')
+    await rateLimit(request, env, 'unsubscribe', 30, 3600, token)
+    await consumeUnsubscribeToken(env, token)
+    const origin = getPrimaryOrigin(env)
+    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Unsubscribed · Runway Systems</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;background:#0a0c10;color:#f4f1e9;font:16px/1.6 Arial,sans-serif;display:grid;place-items:center;min-height:100vh;padding:24px}.card{max-width:520px;background:#11141a;border:1px solid #2b3039;border-radius:16px;padding:36px;text-align:center}p{color:#a9afba}a{display:inline-block;border-radius:8px;padding:12px 22px;background:#c9a227;color:#0a0c10;font-weight:700;text-decoration:none}</style></head><body><main class="card"><small>RUNWAY SYSTEMS</small><h1>Unsubscribed</h1><p>You have been removed from optional marketing. Purchase delivery and security emails are unaffected.</p><a href="${escapeHtml(origin)}">Return to storefront</a></main></body></html>`
+    return new Response(html, { headers: { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'" } })
   }
 
   if (path === '/marketing/unsubscribe' && request.method === 'POST') {
     const body = await readJson(request)
-    const email = cleanText(body.email, 254, 'Email').toLowerCase().trim()
-    if (email) {
-      try {
-        await env.DB.prepare("UPDATE audience_contacts SET status = 'unsubscribed' WHERE email = ?").bind(email).run()
-      } catch {}
-    }
+    const token = cleanText(body.token, 100, 'Unsubscribe token')
+    await rateLimit(request, env, 'unsubscribe', 30, 3600, token)
+    await consumeUnsubscribeToken(env, token)
     return json(request, env, { ok: true, message: 'Unsubscribed successfully' }, 200)
   }
 
   if (path === '/checkout/session' && request.method === 'POST') {
     const user = await authenticate(request, env)
     return json(request, env, await createCheckoutSession(request, env, user), 201, { 'Cache-Control': 'no-store' })
+  }
+  let checkoutMatch = routeMatch(path, /^\/checkout\/session\/([^/]+)$/)
+  if (checkoutMatch && request.method === 'GET') {
+    const user = await authenticate(request, env)
+    const checkoutId = decodeURIComponent(checkoutMatch[1])
+    const consent = await env.DB.prepare('SELECT id FROM checkout_consents WHERE checkout_id = ? AND user_id = ? LIMIT 1').bind(checkoutId, user.id).first()
+    if (!consent) throw new HttpError(404, 'Checkout session not found for this account')
+    const result = await env.DB.prepare(`
+      SELECT * FROM purchases
+      WHERE checkout_id = ? AND user_id = ? AND payment_status = 'paid'
+        AND access_source = 'paid' AND access_status = 'active'
+      ORDER BY created_at ASC
+    `).bind(checkoutId, user.id).all()
+    const productInfo = await productInfoMap(env)
+    const purchases = (result.results || []).map((row) => purchaseFromRow(row, productInfo))
+    return json(request, env, { pending: purchases.length === 0, purchases }, 200, { 'Cache-Control': 'no-store' })
+  }
+  if (path === '/complimentary/claim' && request.method === 'POST') {
+    const user = await authenticate(request, env)
+    await rateLimit(request, env, 'complimentary-claim', 20, 3600, user.id)
+    const body = await readJson(request)
+    return json(request, env, await claimComplimentaryGrant(env, user, body.token), 200, { 'Cache-Control': 'no-store' })
   }
   if (path === '/account' && request.method === 'DELETE') {
     const user = await authenticate(request, env)
@@ -3111,7 +4808,7 @@ async function handleRequest(request, env, ctx) {
     const user = await authenticate(request, env)
     return json(request, env, await getAccountPurchases(env, user), 200, { 'Cache-Control': 'no-store' })
   }
-  let match = routeMatch(path, /^\/account\/purchases\/([^/]+)\/delivery$/)
+  match = routeMatch(path, /^\/account\/purchases\/([^/]+)\/delivery$/)
   if (match && request.method === 'POST') {
     const user = await authenticate(request, env)
     await rateLimit(request, env, 'delivery', 20, 3600, user.id)
@@ -3136,6 +4833,7 @@ async function handleRequest(request, env, ctx) {
           delivery_email_last_error = NULL,
           updated_at = ?
       WHERE id = ? AND user_id = ? AND payment_status = 'paid'
+        AND access_source = 'paid' AND access_status = 'active'
       RETURNING *
     `).bind(nowIso(), purchase.id, user.id).first()
     if (!reset) throw new HttpError(404, 'Purchase not found for this account')
@@ -3191,12 +4889,266 @@ async function handleRequest(request, env, ctx) {
   if (path.startsWith('/admin/')) {
     const isMutation = request.method !== 'GET' && request.method !== 'HEAD' && request.method !== 'OPTIONS'
     const ownerUser = await requireOwner(request, env, { mutation: isMutation })
+
+    if (path === '/admin/blog/categories' && request.method === 'GET') {
+      return json(request, env, { categories: await listBlogCategories(env, { owner: true }) }, 200, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/blog/categories' && request.method === 'POST') {
+      const body = await readJson(request)
+      const name = cleanText(body.name, 60, 'Category name')
+      const slug = normalizeBlogSlug(body.slug || name)
+      if (!slug) throw new HttpError(400, 'Category slug is required')
+      const at = nowIso()
+      const id = crypto.randomUUID()
+      await env.DB.prepare(`INSERT INTO blog_categories (id, slug, name, description, sort_order, active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?)`).bind(id, slug, name, cleanText(body.description || '', 240, 'Description', { required: false }), Number(body.sortOrder || 0), at, at).run()
+      await writeAuditLog(env, request, ownerUser, 'blog.category_create', { entityType: 'blog_category', entityId: id, details: { slug, name } })
+      return json(request, env, { categories: await listBlogCategories(env, { owner: true }) }, 201, { 'Cache-Control': 'no-store' })
+    }
+    match = routeMatch(path, /^\/admin\/blog\/categories\/([^/]+)$/)
+    if (match && request.method === 'PATCH') {
+      const body = await readJson(request)
+      const id = decodeURIComponent(match[1])
+      const existing = await env.DB.prepare('SELECT * FROM blog_categories WHERE id = ?').bind(id).first()
+      if (!existing) throw new HttpError(404, 'Category not found')
+      const name = cleanText(body.name ?? existing.name, 60, 'Category name')
+      const slug = normalizeBlogSlug(body.slug ?? existing.slug)
+      await env.DB.prepare('UPDATE blog_categories SET slug = ?, name = ?, description = ?, sort_order = ?, active = ?, updated_at = ? WHERE id = ?')
+        .bind(slug, name, cleanText(body.description ?? existing.description, 240, 'Description', { required: false }), Number(body.sortOrder ?? existing.sort_order), body.active === false ? 0 : 1, nowIso(), id).run()
+      await writeAuditLog(env, request, ownerUser, 'blog.category_update', { entityType: 'blog_category', entityId: id, details: { slug, name } })
+      await enqueueBlogEvent(env, null, 0, 'category-update')
+      return json(request, env, { categories: await listBlogCategories(env, { owner: true }) }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (path === '/admin/blog/posts' && request.method === 'GET') {
+      const status = cleanText(url.searchParams.get('status') || '', 20, 'Status', { required: false })
+      const search = cleanText(url.searchParams.get('search') || '', 100, 'Search', { required: false })
+      return json(request, env, { posts: await listAdminBlogPosts(env, { status, search, trashed: url.searchParams.get('trashed') === 'true' }) }, 200, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/blog/posts' && request.method === 'POST') {
+      await rateLimit(request, env, 'blog-draft-create', 60, 3600, ownerUser.id)
+      const post = await createBlogDraft(env, ownerUser, await readJson(request))
+      await writeAuditLog(env, request, ownerUser, 'blog.create', { entityType: 'blog_post', entityId: post.id, details: { slug: post.slug, title: post.title } })
+      return json(request, env, { post }, 201, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/blog/import' && request.method === 'POST') {
+      await rateLimit(request, env, 'blog-import', 30, 3600, ownerUser.id)
+      const input = await readJson(request)
+      const post = await importBlogDraft(env, ownerUser, input)
+      const warnings = ['Review AI-created facts, citations, links, and image rights before publishing.']
+      if (/<(?:script|style|iframe|form|object|embed|img)\b/i.test(String(input.content || ''))) warnings.push('Executable, embedded, form, style, or webpage image HTML was removed during safe conversion.')
+      if (/!\[[^\]]*\]\(\s*(?:https?:)?\/\//i.test(String(input.content || ''))) warnings.push('Remote Markdown images were omitted. Add validated images through the Blog media library.')
+      await writeAuditLog(env, request, ownerUser, 'blog.import', { entityType: 'blog_post', entityId: post.id, details: { slug: post.slug, title: post.title } })
+      return json(request, env, { post, warnings }, 201, { 'Cache-Control': 'no-store' })
+    }
+
+    if (path === '/admin/blog/media' && request.method === 'GET') {
+      return json(request, env, { media: await listBlogMedia(env) }, 200, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/blog/media' && request.method === 'POST') {
+      await rateLimit(request, env, 'blog-media-upload', 40, 3600, ownerUser.id)
+      const result = await uploadBlogMedia(env, ownerUser, await readJson(request))
+      await writeAuditLog(env, request, ownerUser, result.duplicate ? 'blog.media_reuse' : 'blog.media_upload', { entityType: 'blog_media', entityId: result.media.id, details: { mimeType: result.media.mimeType, width: result.media.width, height: result.media.height } })
+      return json(request, env, result, result.duplicate ? 200 : 201, { 'Cache-Control': 'no-store' })
+    }
+    match = routeMatch(path, /^\/admin\/blog\/media\/([^/]+)$/)
+    if (match && request.method === 'PATCH') {
+      const id = decodeURIComponent(match[1])
+      const media = await updateBlogMedia(env, id, await readJson(request))
+      await writeAuditLog(env, request, ownerUser, 'blog.media_update', { entityType: 'blog_media', entityId: id })
+      await enqueueBlogEvent(env, null, 0, 'media-update')
+      return json(request, env, { media }, 200, { 'Cache-Control': 'no-store' })
+    }
+    if (match && request.method === 'DELETE') {
+      const id = decodeURIComponent(match[1])
+      const result = await trashBlogMedia(env, id)
+      await writeAuditLog(env, request, ownerUser, 'blog.media_trash', { entityType: 'blog_media', entityId: id })
+      return json(request, env, result, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    match = routeMatch(path, /^\/admin\/blog\/posts\/([^/]+)\/revisions$/)
+    if (match && request.method === 'GET') {
+      const postId = decodeURIComponent(match[1])
+      await blogPostById(env, postId)
+      const result = await env.DB.prepare('SELECT id, post_id, version, reason, created_at FROM blog_post_revisions WHERE post_id = ? ORDER BY created_at DESC LIMIT 100').bind(postId).all()
+      return json(request, env, { revisions: result.results || [] }, 200, { 'Cache-Control': 'no-store' })
+    }
+    match = routeMatch(path, /^\/admin\/blog\/posts\/([^/]+)\/revisions\/([^/]+)\/restore$/)
+    if (match && request.method === 'POST') {
+      const post = await restoreBlogRevision(env, decodeURIComponent(match[1]), decodeURIComponent(match[2]), await readJson(request), ownerUser)
+      await writeAuditLog(env, request, ownerUser, 'blog.revision_restore', { entityType: 'blog_post', entityId: post.id, details: { version: post.version } })
+      return json(request, env, { post }, 200, { 'Cache-Control': 'no-store' })
+    }
+    match = routeMatch(path, /^\/admin\/blog\/posts\/([^/]+)\/change-slug$/)
+    if (match && request.method === 'POST') {
+      const post = await changeBlogSlug(env, decodeURIComponent(match[1]), await readJson(request), ownerUser)
+      await writeAuditLog(env, request, ownerUser, 'blog.slug_change', { entityType: 'blog_post', entityId: post.id, details: { slug: post.slug } })
+      return json(request, env, { post }, 200, { 'Cache-Control': 'no-store' })
+    }
+    match = routeMatch(path, /^\/admin\/blog\/posts\/([^/]+)\/(publish|schedule|unpublish|cancel-schedule|archive|restore|trash)$/)
+    if (match && request.method === 'POST') {
+      const action = match[2]
+      const post = await transitionBlogPost(env, decodeURIComponent(match[1]), action, await readJson(request), ownerUser)
+      await writeAuditLog(env, request, ownerUser, `blog.${action}`, { entityType: 'blog_post', entityId: post.id, details: { slug: post.slug, status: post.status, version: post.version } })
+      return json(request, env, { post }, 200, { 'Cache-Control': 'no-store' })
+    }
+    match = routeMatch(path, /^\/admin\/blog\/posts\/([^/]+)\/permanent$/)
+    if (match && request.method === 'DELETE') {
+      const id = decodeURIComponent(match[1])
+      const { row } = await blogPostById(env, id)
+      if (!row.deleted_at) throw new HttpError(409, 'Move this article to trash first')
+      await env.DB.prepare('DELETE FROM blog_posts WHERE id = ?').bind(id).run()
+      await enqueueBlogEvent(env, null, 0, 'permanent-delete')
+      await writeAuditLog(env, request, ownerUser, 'blog.permanent_delete', { entityType: 'blog_post', entityId: id, details: { slug: row.slug } })
+      return json(request, env, { removed: true, id }, 200, { 'Cache-Control': 'no-store' })
+    }
+    match = routeMatch(path, /^\/admin\/blog\/posts\/([^/]+)$/)
+    if (match && request.method === 'GET') {
+      return json(request, env, { post: (await blogPostById(env, decodeURIComponent(match[1]))).post }, 200, { 'Cache-Control': 'no-store' })
+    }
+    if (match && request.method === 'PATCH') {
+      await rateLimit(request, env, 'blog-draft-save', 240, 3600, ownerUser.id)
+      const post = await updateBlogDraft(env, decodeURIComponent(match[1]), await readJson(request))
+      await writeAuditLog(env, request, ownerUser, 'blog.update', { entityType: 'blog_post', entityId: post.id, details: { slug: post.slug, status: post.status, version: post.version } })
+      return json(request, env, { post }, 200, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/complimentary-grants' && request.method === 'GET') {
+      const limit = Number(url.searchParams.get('limit') || 100)
+      const status = cleanText(url.searchParams.get('status') || '', 20, 'Status', { required: false })
+      const search = cleanText(url.searchParams.get('search') || '', 100, 'Search', { required: false })
+      return json(request, env, await getComplimentaryGrants(env, { limit, status, search }), 200, { 'Cache-Control': 'no-store' })
+    }
+    if (path === '/admin/complimentary-grants' && request.method === 'POST') {
+      await rateLimit(request, env, 'complimentary-grant-create', 50, 3600, ownerUser.id)
+      const result = await createComplimentaryGrant(env, ownerUser, await readJson(request))
+      await writeAuditLog(env, request, ownerUser, result.duplicate ? 'complimentary.duplicate' : 'complimentary.create', {
+        entityType: 'complimentary_grant',
+        entityId: result.grant.id,
+        details: { productKeys: result.grant.products.map((product) => product.productKey), skippedProductKeys: result.skippedProductKeys },
+      })
+      if (!result.duplicate) ctx.waitUntil(deliverComplimentaryInvitation(env, result.grant.id))
+      return json(request, env, result, result.duplicate ? 200 : 202, { 'Cache-Control': 'no-store' })
+    }
+
+    match = routeMatch(path, /^\/admin\/complimentary-grants\/([^/]+)\/resend$/)
+    if (match && request.method === 'POST') {
+      await rateLimit(request, env, 'complimentary-grant-resend', 50, 3600, ownerUser.id)
+      const grantId = decodeURIComponent(match[1])
+      const existing = await env.DB.prepare('SELECT * FROM complimentary_grants WHERE id = ?').bind(grantId).first()
+      if (!existing) throw new HttpError(404, 'Complimentary invitation not found')
+      if (!['pending', 'expired'].includes(existing.status)) throw new HttpError(409, 'Only an unclaimed invitation can be resent')
+      const rawToken = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)))
+      const tokenHash = await sha256Hex(rawToken)
+      const tokenCiphertext = await encryptSensitiveValue(env, 'complimentary-claim-token', rawToken)
+      const updatedAt = nowIso()
+      const expiresAt = new Date(Date.now() + COMPLIMENTARY_TOKEN_TTL_MS).toISOString()
+      const updated = await env.DB.prepare(`
+        UPDATE complimentary_grants
+        SET status = 'pending', token_hash = ?, token_ciphertext = ?, token_expires_at = ?,
+            token_used_at = NULL, email_status = 'pending', email_attempts = 0,
+            email_sent_at = NULL, email_next_eligible_at = '', email_last_error = NULL,
+            updated_at = ?
+        WHERE id = ? AND status IN ('pending', 'expired')
+        RETURNING *
+      `).bind(tokenHash, tokenCiphertext, expiresAt, updatedAt, grantId).first()
+      if (!updated) throw new HttpError(409, 'This invitation can no longer be resent')
+      await refreshComplimentaryAudienceForEmail(env, updated.recipient_email)
+      await writeAuditLog(env, request, ownerUser, 'complimentary.resend', { entityType: 'complimentary_grant', entityId: grantId })
+      ctx.waitUntil(deliverComplimentaryInvitation(env, grantId))
+      const itemMap = await complimentaryItemsByGrant(env, [grantId])
+      return json(request, env, { grant: complimentaryGrantFromRow(updated, itemMap.get(grantId) || []) }, 202, { 'Cache-Control': 'no-store' })
+    }
+
+    match = routeMatch(path, /^\/admin\/complimentary-grants\/([^/]+)\/cancel$/)
+    if (match && request.method === 'POST') {
+      const grantId = decodeURIComponent(match[1])
+      const updatedAt = nowIso()
+      const cancelled = await env.DB.prepare(`
+        UPDATE complimentary_grants
+        SET status = 'cancelled', token_hash = NULL, token_ciphertext = NULL,
+            email_status = CASE WHEN email_status = 'sent' THEN 'sent' ELSE 'cancelled' END,
+            email_next_eligible_at = '', updated_at = ?
+        WHERE id = ? AND status IN ('pending', 'expired')
+        RETURNING *
+      `).bind(updatedAt, grantId).first()
+      if (!cancelled) throw new HttpError(409, 'Only an unclaimed invitation can be cancelled')
+      await refreshComplimentaryAudienceForEmail(env, cancelled.recipient_email)
+      await writeAuditLog(env, request, ownerUser, 'complimentary.cancel', { entityType: 'complimentary_grant', entityId: grantId })
+      return json(request, env, { cancelled: true, grantId }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    match = routeMatch(path, /^\/admin\/complimentary-grants\/([^/]+)\/revoke$/)
+    if (match && request.method === 'POST') {
+      const grantId = decodeURIComponent(match[1])
+      const grant = await env.DB.prepare("SELECT * FROM complimentary_grants WHERE id = ? AND status = 'claimed'").bind(grantId).first()
+      if (!grant) throw new HttpError(409, 'Only active complimentary access can be revoked')
+      const revokedAt = nowIso()
+      await env.DB.batch([
+        env.DB.prepare(`
+          UPDATE complimentary_grants
+          SET status = 'revoked', revoked_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'claimed'
+        `).bind(revokedAt, revokedAt, grantId),
+        env.DB.prepare(`
+          UPDATE purchases SET access_status = 'revoked', updated_at = ?
+          WHERE complimentary_grant_id = ? AND access_source = 'complimentary'
+        `).bind(revokedAt, grantId),
+        env.DB.prepare(`
+          UPDATE complimentary_grant_items SET item_status = 'revoked'
+          WHERE grant_id = ? AND item_status = 'granted'
+        `).bind(grantId),
+        env.DB.prepare(`
+          UPDATE review_requests SET status = 'cancelled', updated_at = ?
+          WHERE purchase_id IN (SELECT id FROM purchases WHERE complimentary_grant_id = ?)
+            AND status != 'sent'
+        `).bind(revokedAt, grantId),
+      ])
+      await refreshComplimentaryAudienceForEmail(env, grant.recipient_email)
+      await writeAuditLog(env, request, ownerUser, 'complimentary.revoke', { entityType: 'complimentary_grant', entityId: grantId })
+      return json(request, env, { revoked: true, grantId }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    match = routeMatch(path, /^\/admin\/complimentary-grants\/([^/]+)\/review-invite$/)
+    if (match && request.method === 'POST') {
+      const grantId = decodeURIComponent(match[1])
+      const grant = await env.DB.prepare("SELECT * FROM complimentary_grants WHERE id = ? AND status = 'claimed'").bind(grantId).first()
+      if (!grant) throw new HttpError(409, 'Review invitations require active complimentary access')
+      const rows = await env.DB.prepare(`
+        SELECT id, user_id, customer_email, customer_name FROM purchases
+        WHERE complimentary_grant_id = ? AND access_source = 'complimentary'
+          AND access_status = 'active' AND payment_status = 'paid'
+      `).bind(grantId).all()
+      if (!(rows.results || []).length) throw new HttpError(409, 'No active complimentary products are eligible for a review invitation')
+      const queuedAt = nowIso()
+      await env.DB.batch((rows.results || []).map((purchase) => env.DB.prepare(`
+        INSERT INTO review_requests (
+          id, purchase_id, user_id, email, customer_name, send_at, status,
+          attempts, created_at, updated_at, next_eligible_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, '')
+        ON CONFLICT(purchase_id) DO UPDATE SET
+          status = CASE WHEN review_requests.status = 'sent' THEN 'sent' ELSE 'pending' END,
+          attempts = CASE WHEN review_requests.status = 'sent' THEN review_requests.attempts ELSE 0 END,
+          send_at = CASE WHEN review_requests.status = 'sent' THEN review_requests.send_at ELSE excluded.send_at END,
+          next_eligible_at = '', last_error = NULL, updated_at = excluded.updated_at
+      `).bind(makeId('review_request'), purchase.id, purchase.user_id, purchase.customer_email, purchase.customer_name, queuedAt, queuedAt, queuedAt)))
+      await env.DB.prepare('UPDATE complimentary_grants SET review_invited_at = ?, updated_at = ? WHERE id = ?').bind(queuedAt, queuedAt, grantId).run()
+      await writeAuditLog(env, request, ownerUser, 'complimentary.review_invite', { entityType: 'complimentary_grant', entityId: grantId, details: { totalQueued: rows.results.length } })
+      ctx.waitUntil(processEmailQueues(env))
+      return json(request, env, { queued: true, totalQueued: rows.results.length, grantId }, 202, { 'Cache-Control': 'no-store' })
+    }
+
     if (path === '/admin/products' && request.method === 'GET') {
       await ensureProductsSeeded(env)
       const result = await env.DB.prepare('SELECT * FROM products ORDER BY sort_order ASC, key ASC').all()
       const rows = result.results || []
       const featuresByKey = await featuresMapForProducts(env, rows)
-      return json(request, env, rows.map((row) => ({ ...productRowToConfig(row), features: featuresByKey.get(row.key) || [] })), 200, { 'Cache-Control': 'no-store' })
+      return json(request, env, rows.map((row) => {
+        const product = productRowToConfig(row)
+        if (product.key === PRODUCT_KEY) product.deliveryUrl = product.deliveryUrl || env.GOOGLE_SHEETS_COPY_URL || ''
+        let deliveryConfigured = false
+        try { productDeliveryUrl(env, product); deliveryConfigured = true } catch { /* shown as unavailable in the owner UI */ }
+        return { ...product, deliveryConfigured, features: featuresByKey.get(row.key) || [] }
+      }), 200, { 'Cache-Control': 'no-store' })
     }
     if (path === '/admin/products' && request.method === 'POST') {
       const body = await readJson(request)
@@ -3379,7 +5331,7 @@ async function handleRequest(request, env, ctx) {
         `).bind(productKey).all()
 
         subscribers = await env.DB.prepare(`
-          SELECT id, email, source, poll_response, welcome_sent_at, notified_at, created_at
+          SELECT id, email, user_id, source, poll_response, welcome_sent_at, notified_at, created_at
           FROM product_waitlist
           WHERE product_key = ?
           ORDER BY created_at DESC
@@ -3395,6 +5347,7 @@ async function handleRequest(request, env, ctx) {
         subscribers: (subscribers.results || []).map((row) => ({
           id: row.id,
           email: row.email,
+          userId: row.user_id || '',
           source: row.source,
           pollResponse: row.poll_response,
           welcomeSentAt: row.welcome_sent_at,
@@ -3417,16 +5370,15 @@ async function handleRequest(request, env, ctx) {
         `).bind(productKey).all()
       } catch {}
 
-      const escapeCsv = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`
       const lines = ['Email,Source,Poll Response,Welcome Sent At,Notified At,Signed Up At']
       for (const r of rows.results || []) {
         lines.push([
-          escapeCsv(r.email),
-          escapeCsv(r.source),
-          escapeCsv(r.poll_response),
-          escapeCsv(r.welcome_sent_at),
-          escapeCsv(r.notified_at),
-          escapeCsv(r.created_at),
+          safeCsvCell(r.email),
+          safeCsvCell(r.source),
+          safeCsvCell(r.poll_response),
+          safeCsvCell(r.welcome_sent_at),
+          safeCsvCell(r.notified_at),
+          safeCsvCell(r.created_at),
         ].join(','))
       }
       return new Response(lines.join('\n'), {
@@ -3478,6 +5430,23 @@ async function handleRequest(request, env, ctx) {
       if (!productRow) throw new HttpError(404, 'Product not found')
       const product = productRowToConfig(productRow)
       const body = await readJson(request)
+      const idempotencyKey = cleanText(body.idempotencyKey, 100, 'Idempotency key')
+      if (!/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) throw new HttpError(400, 'Idempotency key format is invalid')
+      const broadcastId = `waitlist_${(await sha256Hex(`${productKey}:${idempotencyKey}`)).slice(0, 32)}`
+      const dedupePrefix = `waitlist:${productKey}:${idempotencyKey}:`
+      const existingJobs = await env.DB.prepare(`
+        SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent
+        FROM marketing_deliveries WHERE campaign_id = ?
+      `).bind(broadcastId).first()
+      if (Number(existingJobs?.total || 0) > 0) {
+        return json(request, env, {
+          ok: true,
+          duplicate: true,
+          sentCount: Number(existingJobs.sent || 0),
+          totalQueued: Number(existingJobs.total || 0),
+          message: 'This launch announcement was already queued.',
+        }, 202, { 'Cache-Control': 'no-store' })
+      }
 
       const customSubject = cleanText(body.subject, 150, 'Subject', { required: false }) || `${product.name} is now live on Runway Systems`
       const customMessage = cleanText(body.message, 2000, 'Message', { required: false }) || `The wait is over: ${product.name} is officially available. As an early-access subscriber, you can get instant access now.`
@@ -3495,41 +5464,36 @@ async function handleRequest(request, env, ctx) {
         list = unnotified.results || []
       } catch {}
 
-      let sentCount = 0
-      const now = nowIso()
+      const queuedAt = nowIso()
+      await enqueueMarketingDeliveries(env, list.map((subscriber) => ({
+        campaignId: broadcastId,
+        kind: 'waitlist_launch',
+        email: subscriber.email,
+        subject: customSubject,
+        html,
+        waitlistId: subscriber.id,
+        createdAt: queuedAt,
+        dedupeKey: `${dedupePrefix}${subscriber.id}`,
+      })))
 
-      for (const subscriber of list) {
-        try {
-          await sendBrevo(env, {
-            to: subscriber.email,
-            from: env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud',
-            fromName: 'Runway Systems',
-            subject: customSubject,
-            html,
-          })
-          await env.DB.prepare('UPDATE product_waitlist SET notified_at = ? WHERE id = ?').bind(now, subscriber.id).run()
-          sentCount += 1
-        } catch (err) {
-          logEvent('warn', 'waitlist.broadcast_item_failed', { error: err.message, email: subscriber.email })
-        }
-      }
-
-      await writeAuditLog(env, request, ownerUser, 'waitlist.broadcast', {
+      await writeAuditLog(env, request, ownerUser, 'waitlist.broadcast_queued', {
         entityType: 'product',
         entityId: productKey,
-        details: { sentCount, totalUnnotified: list.length },
+        details: { totalQueued: list.length },
       })
+      ctx.waitUntil(processMarketingQueue(env, 5))
 
       return json(request, env, {
         ok: true,
-        sentCount,
+        sentCount: 0,
         totalQueued: list.length,
-        message: `Broadcast complete: sent to ${sentCount} subscribers.`,
-      }, 200, { 'Cache-Control': 'no-store' })
+        message: `Launch announcement queued for ${list.length} subscribers.`,
+      }, 202, { 'Cache-Control': 'no-store' })
     }
 
     if (path === '/admin/marketing/audience' && request.method === 'GET') {
       const segment = url.searchParams.get('segment') || 'all'
+      if (!['all', 'leads', 'customers', 'waitlist', 'unsubscribed'].includes(segment)) throw new HttpError(400, 'Invalid audience segment')
       const search = (url.searchParams.get('search') || '').trim().toLowerCase()
       const productFilter = (url.searchParams.get('product') || '').trim()
       const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10))
@@ -3543,6 +5507,7 @@ async function handleRequest(request, env, ctx) {
         waitlist: 0,
         unsubscribed: 0,
         totalLtvCents: 0,
+        complimentary: 0,
       }
 
       let contacts = []
@@ -3552,11 +5517,12 @@ async function handleRequest(request, env, ctx) {
         const statsRow = await env.DB.prepare(`
           SELECT
             COUNT(*) AS total,
-            COUNT(CASE WHEN is_customer = 0 AND status = 'subscribed' THEN 1 END) AS leads,
-            COUNT(CASE WHEN is_customer = 1 THEN 1 END) AS customers,
-            COUNT(CASE WHEN waitlists_joined != '[]' AND waitlists_joined != '' THEN 1 END) AS waitlist,
+            COUNT(CASE WHEN is_customer = 0 AND status = 'subscribed' AND marketing_opt_in_at != '' THEN 1 END) AS leads,
+            COUNT(CASE WHEN is_customer = 1 AND status = 'subscribed' AND marketing_opt_in_at != '' THEN 1 END) AS customers,
+            COUNT(CASE WHEN waitlists_joined != '[]' AND waitlists_joined != '' AND status = 'subscribed' AND marketing_opt_in_at != '' THEN 1 END) AS waitlist,
             COUNT(CASE WHEN status = 'unsubscribed' THEN 1 END) AS unsubscribed,
-            COALESCE(SUM(total_spend_cents), 0) AS totalLtvCents
+            COALESCE(SUM(total_spend_cents), 0) AS totalLtvCents,
+            COUNT(CASE WHEN complimentary_status IN ('pending', 'active') THEN 1 END) AS complimentary
           FROM audience_contacts
         `).first()
 
@@ -3568,6 +5534,7 @@ async function handleRequest(request, env, ctx) {
             waitlist: Number(statsRow.waitlist || 0),
             unsubscribed: Number(statsRow.unsubscribed || 0),
             totalLtvCents: Number(statsRow.totalLtvCents || 0),
+            complimentary: Number(statsRow.complimentary || 0),
           }
         }
 
@@ -3575,11 +5542,11 @@ async function handleRequest(request, env, ctx) {
         const params = []
 
         if (segment === 'leads') {
-          whereClauses.push("is_customer = 0 AND status = 'subscribed'")
+          whereClauses.push("is_customer = 0 AND status = 'subscribed' AND marketing_opt_in_at != ''")
         } else if (segment === 'customers') {
-          whereClauses.push("is_customer = 1")
+          whereClauses.push("is_customer = 1 AND status = 'subscribed' AND marketing_opt_in_at != ''")
         } else if (segment === 'waitlist') {
-          whereClauses.push("waitlists_joined != '[]' AND waitlists_joined != ''")
+          whereClauses.push("waitlists_joined != '[]' AND waitlists_joined != '' AND status = 'subscribed' AND marketing_opt_in_at != ''")
         } else if (segment === 'unsubscribed') {
           whereClauses.push("status = 'unsubscribed'")
         }
@@ -3605,7 +5572,9 @@ async function handleRequest(request, env, ctx) {
         const listQuery = `
           SELECT id, email, user_id, name, avatar_url, source, status,
                  is_customer, total_spend_cents, orders_count,
-                 products_owned, waitlists_joined, last_seen_at, created_at
+                 products_owned, waitlists_joined, complimentary_status,
+                 complimentary_products, marketing_opt_in_source,
+                 marketing_opt_in_at, last_seen_at, created_at
           FROM audience_contacts
           ${whereSql}
           ORDER BY created_at DESC
@@ -3625,6 +5594,10 @@ async function handleRequest(request, env, ctx) {
           ordersCount: Number(row.orders_count || 0),
           productsOwned: parseJsonSafe(row.products_owned, []),
           waitlistsJoined: parseJsonSafe(row.waitlists_joined, []),
+          complimentaryStatus: row.complimentary_status || '',
+          complimentaryProducts: parseJsonSafe(row.complimentary_products, []),
+          marketingOptInSource: row.marketing_opt_in_source || '',
+          marketingOptInAt: row.marketing_opt_in_at || '',
           lastSeenAt: row.last_seen_at,
           createdAt: row.created_at,
         }))
@@ -3654,32 +5627,38 @@ async function handleRequest(request, env, ctx) {
       try {
         rows = await env.DB.prepare(`
           SELECT email, name, source, status, is_customer, total_spend_cents, orders_count,
-                 products_owned, waitlists_joined, created_at, last_seen_at
+                 products_owned, waitlists_joined, complimentary_status,
+                 complimentary_products, marketing_opt_in_source,
+                 marketing_opt_in_at, created_at, last_seen_at
           FROM audience_contacts
           ${whereSql}
           ORDER BY created_at DESC
         `).all()
       } catch {}
 
-      const escapeCsv = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`
-      const lines = ['Email,Name,Source,Status,Segment,Total Spend (USD),Orders Count,Products Owned,Waitlists,Joined At,Last Seen At']
+      const lines = ['Email,Name,Source,Status,Marketing Opt-In Source,Marketing Opt-In At,Segment,Total Spend (USD),Orders Count,Products Owned,Waitlists,Complimentary Status,Complimentary Products,Joined At,Last Seen At']
       for (const r of rows.results || []) {
         const owned = parseJsonSafe(r.products_owned, []).join('; ')
         const waitlists = parseJsonSafe(r.waitlists_joined, []).join('; ')
+        const complimentaryProducts = parseJsonSafe(r.complimentary_products, []).join('; ')
         const spend = (Number(r.total_spend_cents || 0) / 100).toFixed(2)
         const seg = r.is_customer ? 'Customer' : 'Lead'
         lines.push([
-          escapeCsv(r.email),
-          escapeCsv(r.name),
-          escapeCsv(r.source),
-          escapeCsv(r.status),
-          escapeCsv(seg),
-          escapeCsv(`$${spend}`),
-          escapeCsv(r.orders_count || 0),
-          escapeCsv(owned),
-          escapeCsv(waitlists),
-          escapeCsv(r.created_at),
-          escapeCsv(r.last_seen_at),
+          safeCsvCell(r.email),
+          safeCsvCell(r.name),
+          safeCsvCell(r.source),
+          safeCsvCell(r.status),
+          safeCsvCell(r.marketing_opt_in_source || ''),
+          safeCsvCell(r.marketing_opt_in_at || ''),
+          safeCsvCell(seg),
+          safeCsvCell(`$${spend}`),
+          safeCsvCell(r.orders_count || 0),
+          safeCsvCell(owned),
+          safeCsvCell(waitlists),
+          safeCsvCell(r.complimentary_status || ''),
+          safeCsvCell(complimentaryProducts),
+          safeCsvCell(r.created_at),
+          safeCsvCell(r.last_seen_at),
         ].join(','))
       }
       return new Response(lines.join('\n'), {
@@ -3699,8 +5678,10 @@ async function handleRequest(request, env, ctx) {
       if (!email || !email.includes('@')) throw new HttpError(400, 'A valid email is required')
       const name = cleanText(body.name, 100, 'Name', { required: false }) || ''
       const source = cleanText(body.source, 40, 'Source', { required: false }) || 'manual'
+      if (source !== 'manual') throw new HttpError(400, 'Admin-created contacts must use the manual source')
+      if (body.consentConfirmed !== true) throw new HttpError(400, 'Confirm that this contact explicitly requested marketing before subscribing them')
 
-      await recordAudienceContact(env, { email, name, source })
+      await recordAudienceContact(env, { email, name, source, marketingOptIn: true, marketingOptInSource: 'manual_admin_confirmation' })
       await writeAuditLog(env, request, ownerUser, 'marketing.contact_create', { entityType: 'contact', entityId: email, details: { name, source } })
       return json(request, env, { ok: true, message: 'Contact saved successfully' }, 201, { 'Cache-Control': 'no-store' })
     }
@@ -3718,8 +5699,18 @@ async function handleRequest(request, env, ctx) {
       const nextName = body.name !== undefined ? cleanText(body.name, 100, 'Name', { required: false }) : null
       const nextStatus = body.status || null
 
-      if (nextStatus) {
-        await env.DB.prepare('UPDATE audience_contacts SET status = ? WHERE id = ?').bind(nextStatus, contactId).run()
+      if (nextStatus === 'subscribed') {
+        if (body.consentConfirmed !== true) throw new HttpError(400, 'Renewed marketing consent must be confirmed before resubscribing')
+        await env.DB.prepare(`
+          UPDATE audience_contacts
+          SET status = 'subscribed', marketing_opt_in_at = ?,
+              marketing_opt_in_source = 'manual_admin_confirmation', marketing_opt_in_policy_version = 'marketing-v1'
+          WHERE id = ?
+        `).bind(nowIso(), contactId).run()
+        await env.DB.prepare('DELETE FROM marketing_suppressions WHERE email_hash = ?')
+          .bind(await marketingEmailHash(env, existing.email)).run()
+      } else if (nextStatus === 'unsubscribed') {
+        await suppressMarketingEmail(env, existing.email, 'admin_action')
       }
       if (nextName !== null) {
         await env.DB.prepare('UPDATE audience_contacts SET name = ? WHERE id = ?').bind(nextName, contactId).run()
@@ -3733,6 +5724,7 @@ async function handleRequest(request, env, ctx) {
       const contactId = decodeURIComponent(match[1])
       const existing = await env.DB.prepare('SELECT id, email FROM audience_contacts WHERE id = ?').bind(contactId).first()
       if (!existing) throw new HttpError(404, 'Contact not found')
+      await suppressMarketingEmail(env, existing.email, 'admin_delete')
       await env.DB.prepare('DELETE FROM audience_contacts WHERE id = ?').bind(contactId).run()
       await writeAuditLog(env, request, ownerUser, 'marketing.contact_delete', { entityType: 'contact', entityId: existing.email })
       return json(request, env, { ok: true, message: 'Contact deleted' }, 200, { 'Cache-Control': 'no-store' })
@@ -3744,7 +5736,8 @@ async function handleRequest(request, env, ctx) {
         rows = await env.DB.prepare(`
           SELECT id, title, subject, preview_text AS previewText, target_segment AS targetSegment,
                  target_product_key AS targetProductKey, cta_label AS ctaLabel, cta_url AS ctaUrl,
-                 discount_code AS discountCode, recipient_count AS recipientCount, sent_by AS sentBy, sent_at AS sentAt
+                 discount_code AS discountCode, recipient_count AS recipientCount, sent_count AS sentCount,
+                 failed_count AS failedCount, status, completed_at AS completedAt, sent_by AS sentBy, sent_at AS sentAt
           FROM marketing_campaigns
           ORDER BY sent_at DESC
           LIMIT 50
@@ -3761,7 +5754,8 @@ async function handleRequest(request, env, ctx) {
       const rawMessage = cleanText(body.message, 5000, 'Message')
       const discountCode = cleanText(body.discountCode, 30, 'Discount code', { required: false }) || ''
       const ctaLabel = cleanText(body.ctaLabel, 60, 'CTA Label', { required: false }) || ''
-      const ctaUrl = cleanText(body.ctaUrl, 500, 'CTA URL', { required: false }) || ''
+      const rawCtaUrl = cleanText(body.ctaUrl, 500, 'CTA URL', { required: false }) || ''
+      const ctaUrl = rawCtaUrl ? validHttpUrl(rawCtaUrl, 'CTA URL') : ''
       const targetProductKey = cleanText(body.targetProductKey, 60, 'Target product key', { required: false }) || ''
 
       let product = null
@@ -3786,7 +5780,7 @@ async function handleRequest(request, env, ctx) {
         actionLabel: ctaLabel,
         actionUrl: ctaUrl || getPrimaryOrigin(env),
         footerText,
-        unsubscribeUrl: `${getPrimaryOrigin(env)}/unsubscribe`,
+        unsubscribeUrl: '',
       })
 
       await sendBrevo(env, {
@@ -3808,10 +5802,13 @@ async function handleRequest(request, env, ctx) {
       const eyebrow = cleanText(body.eyebrow, 80, 'Eyebrow', { required: false }) || 'RUNWAY SYSTEMS · VIP ANNOUNCEMENT'
       const rawMessage = cleanText(body.message, 5000, 'Message')
       const targetSegment = cleanText(body.targetSegment, 40, 'Target segment', { required: false }) || 'all'
+      if (!['all', 'leads', 'customers', 'waitlist'].includes(targetSegment)) throw new HttpError(400, 'Invalid campaign target segment')
       const targetProductKey = cleanText(body.targetProductKey, 60, 'Target product key', { required: false }) || ''
       const discountCode = cleanText(body.discountCode, 30, 'Discount code', { required: false }) || ''
       const ctaLabel = cleanText(body.ctaLabel, 60, 'CTA Label', { required: false }) || ''
-      const ctaUrl = cleanText(body.ctaUrl, 500, 'CTA URL', { required: false }) || ''
+      const rawCtaUrl = cleanText(body.ctaUrl, 500, 'CTA URL', { required: false }) || ''
+      const ctaUrl = rawCtaUrl ? validHttpUrl(rawCtaUrl, 'CTA URL') : ''
+      const idempotencyKey = cleanText(body.idempotencyKey, 100, 'Idempotency key')
 
       let product = null
       if (targetProductKey) {
@@ -3821,9 +5818,8 @@ async function handleRequest(request, env, ctx) {
         } catch {}
       }
 
-      let query = "SELECT id, email, name, user_id, products_owned FROM audience_contacts WHERE status = 'subscribed'"
+      let query = "SELECT id, email, name, user_id, products_owned FROM audience_contacts WHERE status = 'subscribed' AND marketing_opt_in_at != ''"
       const params = []
-
       if (targetSegment === 'leads') {
         query += ' AND is_customer = 0'
       } else if (targetSegment === 'customers') {
@@ -3837,92 +5833,79 @@ async function handleRequest(request, env, ctx) {
         }
       }
 
-      let recipients = []
-      try {
-        const rows = params.length > 0
-          ? await env.DB.prepare(query).bind(...params).all()
-          : await env.DB.prepare(query).all()
-        recipients = rows.results || []
-      } catch (err) {
-        throw new HttpError(500, `Failed to load recipients: ${err.message}`)
+      const rows = params.length > 0
+        ? await env.DB.prepare(query).bind(...params).all()
+        : await env.DB.prepare(query).all()
+      const recipients = rows.results || []
+      if (!recipients.length) throw new HttpError(400, 'No explicitly opted-in recipients found for this target segment.')
+
+      const campaignId = `campaign_${(await sha256Hex(`${ownerUser.id}:${idempotencyKey}`)).slice(0, 32)}`
+      const existingCampaign = await env.DB.prepare('SELECT id, recipient_count AS recipientCount, sent_count AS sentCount, status FROM marketing_campaigns WHERE id = ?').bind(campaignId).first()
+      if (existingCampaign) {
+        return json(request, env, { ok: true, campaignId, totalQueued: Number(existingCampaign.recipientCount || 0), sentCount: Number(existingCampaign.sentCount || 0), status: existingCampaign.status, duplicate: true }, 202, { 'Cache-Control': 'no-store' })
       }
 
-      if (!recipients.length) {
-        throw new HttpError(400, 'No eligible subscribed recipients found for this target segment.')
-      }
+      const queuedAt = nowIso()
+      await env.DB.prepare(`
+        INSERT INTO marketing_campaigns (
+          id, title, subject, preview_text, target_segment, target_product_key,
+          cta_label, cta_url, discount_code, body_html, recipient_count,
+          sent_by, sent_at, status, sent_count, failed_count, metadata
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0, ?)
+      `).bind(
+        campaignId, title, subject, eyebrow, targetSegment, targetProductKey,
+        ctaLabel, ctaUrl, discountCode, rawMessage, recipients.length,
+        ownerUser.email || 'owner', queuedAt,
+        JSON.stringify({ idempotencyKey, consentPolicyVersion: 'marketing-v1' }),
+      ).run()
 
-      let sentCount = 0
+      const apiOrigin = new URL(request.url).origin
       const origin = getPrimaryOrigin(env)
-
+      const jobs = []
       for (const contact of recipients) {
-        try {
-          const personalizedSubject = renderMarketingTemplate(subject, contact, product)
-          const personalizedMessage = renderMarketingTemplate(rawMessage, contact, product)
-          const formattedBody = formatMarketingBodyToHtml(personalizedMessage)
-          const unsubscribeUrl = `${origin}/unsubscribe?email=${encodeURIComponent(contact.email)}`
-          const footerText = `You received this email because you have a Runway Systems account or joined our waitlist.\nFrom: ${env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud'}`
-
-          const html = marketingEmailLayout({
-            title: personalizedSubject,
-            eyebrow,
-            bodyHtml: formattedBody,
-            discountCode,
-            actionLabel: ctaLabel,
-            actionUrl: ctaUrl || origin,
-            footerText,
-            unsubscribeUrl,
-          })
-
-          await sendBrevo(env, {
-            to: contact.email,
-            from: env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud',
-            fromName: 'Runway Systems',
-            subject: personalizedSubject,
-            html,
-          })
-          sentCount += 1
-        } catch (mailError) {
-          logEvent('warn', 'marketing.broadcast_item_failed', { error: mailError.message, email: contact.email })
-        }
-      }
-
-      const campaignId = makeId('campaign')
-      const now = nowIso()
-      try {
-        await env.DB.prepare(`
-          INSERT INTO marketing_campaigns (
-            id, title, subject, preview_text, target_segment, target_product_key,
-            cta_label, cta_url, discount_code, recipient_count, sent_by, sent_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).bind(
-          campaignId,
-          title,
-          subject,
+        const unsubscribeToken = await createUnsubscribeToken(env, contact.email)
+        const unsubscribeUrl = `${apiOrigin}/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`
+        const personalizedSubject = renderMarketingTemplate(subject, contact, product)
+        const personalizedMessage = renderMarketingTemplate(rawMessage, contact, product)
+        const footerText = `You received this because you explicitly opted in to Runway Systems marketing.\nFrom: ${env.EMAIL_FROM_INFO || 'info@runwaysystems.cloud'}`
+        const html = marketingEmailLayout({
+          title: personalizedSubject,
           eyebrow,
-          targetSegment,
-          targetProductKey,
-          ctaLabel,
-          ctaUrl,
+          bodyHtml: formatMarketingBodyToHtml(personalizedMessage),
           discountCode,
-          sentCount,
-          ownerUser.email || 'owner',
-          now,
-        ).run()
-      } catch {}
+          actionLabel: ctaLabel,
+          actionUrl: ctaUrl || origin,
+          footerText,
+          unsubscribeUrl,
+        })
+        jobs.push({
+          campaignId,
+          kind: 'campaign',
+          email: contact.email,
+          subject: personalizedSubject,
+          html,
+          unsubscribeUrl,
+          createdAt: queuedAt,
+          dedupeKey: `campaign:${campaignId}:${contact.id}`,
+        })
+      }
+      await enqueueMarketingDeliveries(env, jobs)
 
-      await writeAuditLog(env, request, ownerUser, 'marketing.broadcast', {
+      await writeAuditLog(env, request, ownerUser, 'marketing.broadcast_queued', {
         entityType: 'campaign',
         entityId: campaignId,
-        details: { title, targetSegment, sentCount, totalTargeted: recipients.length },
+        details: { title, targetSegment, totalQueued: recipients.length },
       })
+      ctx.waitUntil(processMarketingQueue(env, 5))
 
       return json(request, env, {
         ok: true,
         campaignId,
-        sentCount,
+        sentCount: 0,
         totalQueued: recipients.length,
-        message: `Campaign broadcast dispatched to ${sentCount} recipients via Brevo.`,
-      }, 200, { 'Cache-Control': 'no-store' })
+        status: 'queued',
+        message: `Campaign queued for ${recipients.length} opted-in recipients.`,
+      }, 202, { 'Cache-Control': 'no-store' })
     }
 
     if (path === '/admin/testimonials' && request.method === 'GET') {
@@ -3960,11 +5943,40 @@ async function handleRequest(request, env, ctx) {
     }
     if (path === '/admin/integrations/status' && request.method === 'GET') return json(request, env, await getIntegrationStatus(env), 200, { 'Cache-Control': 'no-store' })
 
+    // Exchange a current authenticator or recovery code for a signed,
+    // session-bound five-minute challenge. The browser stores this challenge,
+    // never the reusable raw authenticator code.
+    if (path === '/admin/totp/challenge' && request.method === 'POST') {
+      const body = await readJson(request)
+      const row = await env.DB.prepare('SELECT secret, verified_at FROM admin_totp WHERE id = 1').first()
+      if (!row?.verified_at) throw new HttpError(409, 'Two-factor authentication is not fully enrolled.')
+      const code = cleanText(body.code, 16, 'Security code', { required: false })
+      const recoveryCode = cleanText(body.recoveryCode, 16, 'Recovery code', { required: false })
+      let ok = false
+      let method = ''
+      if (code && await verifyTotp(await readTotpSecret(env, row.secret), code)) {
+        ok = true
+        method = 'totp'
+      }
+      if (!ok && recoveryCode && await consumeRecoveryCode(env, recoveryCode)) {
+        ok = true
+        method = 'recovery'
+      }
+      if (!ok) {
+        await writeAuditLog(env, request, ownerUser, 'totp.challenge_failed', { entityType: 'admin_totp', entityId: '1' })
+        throw new HttpError(401, 'The authenticator or recovery code is incorrect.')
+      }
+      await env.DB.prepare('UPDATE admin_totp SET last_used_at = ? WHERE id = 1').bind(nowIso()).run()
+      const issued = await createAdminChallenge(env, request, ownerUser)
+      await writeAuditLog(env, request, ownerUser, 'totp.challenge_issued', { entityType: 'admin_totp', entityId: '1', details: { method } })
+      return json(request, env, issued, 200, { 'Cache-Control': 'no-store' })
+    }
+
     // TOTP enrolment. The first response returns the secret and recovery
     // codes (so the owner can scan/print them). The second request confirms
     // enrolment by sending a valid code from the authenticator app; only
-    // then do we flip the row to "verified". Until verified, mutations are
-    // still permitted (the owner is enrolling for the first time).
+    // then do we flip the row to "verified". An interrupted unverified
+    // enrolment can safely be restarted.
     if (path === '/admin/totp/enrol' && request.method === 'POST') {
       const existing = await env.DB.prepare('SELECT 1 AS one, verified_at FROM admin_totp WHERE id = 1').first()
       if (existing?.one && existing.verified_at) {
@@ -3974,13 +5986,14 @@ async function handleRequest(request, env, ctx) {
       const secret = bytesToBase32(secretBytes)
       const recoveryCodes = await generateRecoveryCodes(10)
       const recoveryHashes = await hashRecoveryCodes(recoveryCodes)
+      const encryptedSecret = await encryptSensitiveValue(env, 'admin-totp-secret', secret)
       const now = nowIso()
       await env.DB.prepare(`
         INSERT INTO admin_totp (id, secret, enrolled_at, recovery_codes_hash)
         VALUES (1, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET secret = excluded.secret, enrolled_at = excluded.enrolled_at,
           recovery_codes_hash = excluded.recovery_codes_hash, verified_at = NULL, last_used_at = NULL
-      `).bind(secret, now, recoveryHashes).run()
+      `).bind(encryptedSecret, now, recoveryHashes).run()
       await writeAuditLog(env, request, ownerUser, 'totp.enrol_start', { entityType: 'admin_totp', entityId: '1' })
       return json(request, env, {
         secret,
@@ -3993,14 +6006,15 @@ async function handleRequest(request, env, ctx) {
       const candidate = cleanText(body.code, 10, 'TOTP code')
       const row = await env.DB.prepare('SELECT secret FROM admin_totp WHERE id = 1').first()
       if (!row) throw new HttpError(409, 'Two-factor authentication has not been enrolled yet.')
-      const ok = await verifyTotp(row.secret, candidate)
+      const ok = await verifyTotp(await readTotpSecret(env, row.secret), candidate)
       if (!ok) {
         await writeAuditLog(env, request, ownerUser, 'totp.verify_failed', { entityType: 'admin_totp', entityId: '1' })
         throw new HttpError(401, 'The code is incorrect.')
       }
-      await env.DB.prepare('UPDATE admin_totp SET verified_at = ? WHERE id = 1').bind(nowIso()).run()
+      const verifiedAt = nowIso()
+      await env.DB.prepare('UPDATE admin_totp SET verified_at = ?, last_used_at = ? WHERE id = 1').bind(verifiedAt, verifiedAt).run()
       await writeAuditLog(env, request, ownerUser, 'totp.verify_ok', { entityType: 'admin_totp', entityId: '1' })
-      return json(request, env, { verified: true }, 200, { 'Cache-Control': 'no-store' })
+      return json(request, env, { verified: true, ...(await createAdminChallenge(env, request, ownerUser)) }, 200, { 'Cache-Control': 'no-store' })
     }
     if (path === '/admin/totp/status' && request.method === 'GET') {
       const row = await env.DB.prepare('SELECT enrolled_at, verified_at, last_used_at FROM admin_totp WHERE id = 1').first()
@@ -4042,7 +6056,8 @@ async function handleRequest(request, env, ctx) {
             delivery_email_next_eligible_at = '',
             delivery_email_last_error = NULL,
             updated_at = ?
-        WHERE id = ? AND payment_status = 'paid' AND delivery_email_status != 'sent'
+        WHERE id = ? AND payment_status = 'paid' AND access_source = 'paid'
+          AND access_status = 'active' AND delivery_email_status != 'sent'
         RETURNING id, product_key
       `).bind(nowIso(), purchaseId).first()
       if (!reset) throw new HttpError(404, 'No undelivered paid purchase with that id')
@@ -4086,12 +6101,24 @@ export default {
 // telemetry rows past their retention window so client_errors cannot grow
 // without bound. Both are idempotent, so a retried tick is harmless.
 async function runScheduledTasks(env) {
+  try {
+    await processScheduledBlogPosts(env)
+    await processBlogOutbox(env)
+    await cleanupBlogTrash(env)
+  } catch (error) {
+    logEvent('warn', 'blog_automation_failed', { error: error?.message })
+  }
   await processEmailQueues(env)
   if (!env.DB) return
   try {
     const cutoff = new Date(Date.now() - CLIENT_ERROR_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString()
-    await env.DB.prepare('DELETE FROM client_errors WHERE created_at < ?').bind(cutoff).run()
+    const auditCutoff = new Date(Date.now() - ADMIN_AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString()
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM client_errors WHERE created_at < ?').bind(cutoff),
+      env.DB.prepare('DELETE FROM admin_audit_log WHERE created_at < ?').bind(auditCutoff),
+      env.DB.prepare('DELETE FROM newsletter_confirmations WHERE expires_at < ? OR (used_at IS NOT NULL AND used_at < ?)').bind(nowIso(), cutoff),
+    ])
   } catch (error) {
-    logEvent('warn', 'client_error_prune_failed', { error: error?.message })
+    logEvent('warn', 'retention_prune_failed', { error: error?.message })
   }
 }

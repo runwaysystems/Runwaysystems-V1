@@ -4,28 +4,16 @@
 
 import { defaultProducts } from '../data/catalog'
 
-const DEFAULT_PRODUCTION_API_BASE_URL = 'https://cashflow-os-platform.runwaysystems-cloud.workers.dev'
-const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
-const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.DEV ? '' : DEFAULT_PRODUCTION_API_BASE_URL)
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
-// The localStorage adapter below is a PREVIEW-ONLY provider for interface
-// development. Local dev may still opt into it by leaving VITE_API_BASE_URL
-// empty, but production builds now fall back to the Runway Systems Worker so
-// dashboard edits persist to D1 and the sitemap can reflect active products.
-export const IS_PREVIEW_DATA = !API_BASE_URL
+// Browser-local preview data is allowed only during Vite development. A
+// production or staging build without an explicit Worker URL fails closed
+// instead of silently talking to production or persisting fake local data.
+export const IS_PREVIEW_DATA = !API_BASE_URL && import.meta.env.DEV
+export const API_CONFIGURATION_MISSING = !API_BASE_URL && !import.meta.env.DEV
 
-if (!configuredApiBaseUrl && API_BASE_URL && typeof window !== 'undefined' && !import.meta.env.DEV) {
-  console.warn(
-    '[Runway Systems] VITE_API_BASE_URL is not set in this build. Falling back to ' +
-    `${DEFAULT_PRODUCTION_API_BASE_URL}. Set VITE_API_BASE_URL explicitly in Pages for staging or custom Worker domains.`,
-  )
-}
-
-if (IS_PREVIEW_DATA && typeof window !== 'undefined' && !import.meta.env.DEV) {
-  console.error(
-    '[Runway Systems] The storefront is running on preview mock data: dashboard numbers are seeded demo values ' +
-    'and product edits are saved only to this browser. Set VITE_API_BASE_URL to your Worker URL in the Pages build variables and redeploy.',
-  )
+if (API_CONFIGURATION_MISSING && typeof window !== 'undefined') {
+  console.error('[Runway Systems] VITE_API_BASE_URL is required for this deployment. API operations are disabled.')
 }
 const STORAGE_KEY = 'cashflow-platform-mock-v2'
 const DATA_EVENT = 'cashflow-platform-data-change'
@@ -88,6 +76,9 @@ const defaultSettings = {
 const mockAnalytics = {
   totalSales: 284,
   revenue: 11076,
+  complimentaryCustomers: 0,
+  complimentaryClaimed: 0,
+  complimentaryPending: 0,
   conversionRate: 4.8,
   pageViews: 14820,
   averageRating: 4.8,
@@ -237,7 +228,30 @@ const seedMarketingCampaigns = [
   },
 ]
 
+const seedBlogCategories = [
+  { id: 'blog-category-finance', slug: 'finance', name: 'Finance', description: 'Cash flow, forecasting, and financial operating rhythms.', active: true, publishedCount: 1 },
+  { id: 'blog-category-clients', slug: 'clients', name: 'Clients', description: 'Client relationships and retention.', active: true, publishedCount: 0 },
+  { id: 'blog-category-projects', slug: 'projects', name: 'Projects', description: 'Planning, delivery, and capacity.', active: true, publishedCount: 0 },
+  { id: 'blog-category-operations', slug: 'operations', name: 'Operations', description: 'Calmer independent-business systems.', active: true, publishedCount: 0 },
+]
+
+const seedBlogPosts = [{
+  id: 'blog-preview-runway-clarity', slug: 'build-a-clearer-financial-runway',
+  title: 'Build a clearer financial runway before your next big decision',
+  excerpt: 'A practical operating rhythm for turning scattered business numbers into a calm, useful view of cash, commitments, and what comes next.',
+  bodyMarkdown: '## Clarity starts with one operating view\n\nMost founders do not need another disconnected report. They need one place that explains what is available now, what is already committed, and which decisions can wait.\n\n> A useful system reduces decision friction. It does not create more reporting work.\n\n## Start with the questions\n\n- What can the business safely spend?\n- Which invoices need attention this week?\n- How many months of runway remain?\n\n## Keep the rhythm small\n\nReview the same view every Monday. Record the decision it creates, and improve the model only when a real question cannot be answered.',
+  status: 'published', layout: 'editorial', category: seedBlogCategories[0], tags: ['Cash flow', 'Planning'],
+  authorName: 'Runway Systems', cover: null, seoTitle: '', seoDescription: '', featured: true,
+  scheduledAt: '', firstPublishedAt: '2026-09-12T09:00:00.000Z', publishedAt: '2026-09-12T09:00:00.000Z',
+  version: 1, createdAt: '2026-09-11T09:00:00.000Z', updatedAt: '2026-09-12T09:00:00.000Z', readingMinutes: 2, deletedAt: '',
+}]
+
 const clone = (value) => JSON.parse(JSON.stringify(value))
+const escapeCsvCell = (value) => {
+  const raw = String(value ?? '')
+  const neutralized = /^[\s]*[=+\-@]/.test(raw) ? `'${raw}` : raw
+  return `"${neutralized.replace(/"/g, '""')}"`
+}
 const wait = (ms = 180) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const makeId = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -250,6 +264,11 @@ function emptyState() {
     bundles: [],
     audienceContacts: clone(seedAudienceContacts),
     marketingCampaigns: clone(seedMarketingCampaigns),
+    complimentaryGrants: [],
+    blogCategories: clone(seedBlogCategories),
+    blogPosts: clone(seedBlogPosts),
+    blogMedia: [],
+    blogRevisions: [],
   }
 }
 
@@ -288,7 +307,7 @@ function mockAllProducts(state) {
       active,
       waitlistConfig,
       waitlistCount,
-      checkoutReady: Boolean(base.lemonVariantId && base.lemonVariantId !== '' && status !== 'coming_soon'),
+      checkoutReady: mockCheckoutReady(base, status),
     }
   })
   // Owner-created products that are not part of the built-in catalog still
@@ -307,7 +326,7 @@ function mockAllProducts(state) {
         active,
         waitlistConfig,
         waitlistCount,
-        checkoutReady: Boolean(saved.lemonVariantId && saved.lemonVariantId !== '' && status !== 'coming_soon'),
+        checkoutReady: mockCheckoutReady(saved, status),
       })
     }
   }
@@ -319,6 +338,22 @@ function mockAllProducts(state) {
 // dashboard keeps showing locally.
 function mockProducts(state) {
   return mockAllProducts(state).filter((product) => product.active !== false && product.status !== 'hidden')
+}
+
+function friendlyMockProductName(state, productKey) {
+  return mockAllProducts(state).find((product) => product.key === productKey)?.name || productKey
+}
+
+// Local preview products deliberately simulate a configured checkout so the
+// Active and Coming Soon states can be reviewed independently. The static
+// catalog and preview mutations already carry checkoutReady=true; do not
+// discard that signal merely because preview data has no real Lemon Squeezy
+// variant ID. The deployed Worker remains authoritative and only reports a
+// live checkout as ready when a genuine variant is configured.
+function mockCheckoutReady(product, status) {
+  if (status === 'coming_soon' || status === 'hidden') return false
+  if (typeof product.checkoutReady === 'boolean') return product.checkoutReady
+  return Boolean(product.lemonVariantId)
 }
 
 // Two products that render as the same card (same key, or the same display
@@ -342,6 +377,7 @@ export function dedupeProducts(products) {
 }
 
 function readMockState() {
+  if (!IS_PREVIEW_DATA) throw new Error('This deployment is missing VITE_API_BASE_URL. Configure the Worker URL and redeploy.')
   try {
     const saved = window.localStorage.getItem(STORAGE_KEY)
     if (!saved) return emptyState()
@@ -366,22 +402,26 @@ function writeMockState(state) {
   }
 }
 
-async function request(path, { method = 'GET', body, token, keepalive = false, totp, recovery } = {}) {
-  const activeTotp = !totp && isAdminPath(path) ? getActiveAdminTotp() : ''
+async function request(path, { method = 'GET', body, token, keepalive = false, challenge, totp, recovery, signal } = {}) {
+  if (!API_BASE_URL) throw new Error('The platform API is not configured for this deployment.')
+  const activeChallenge = !challenge && isAdminMutation(path, method) ? getActiveAdminChallenge() : ''
   let response
   try {
+    const timeoutSignal = AbortSignal.timeout(12000)
     response = await fetch(`${API_BASE_URL}${path}`, {
       method,
       headers: {
         ...(body ? { 'Content-Type': 'application/json' } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(activeTotp ? { 'X-Admin-TOTP': activeTotp } : {}),
+        ...(activeChallenge ? { 'X-Admin-Challenge': activeChallenge } : {}),
+        ...(challenge ? { 'X-Admin-Challenge': challenge } : {}),
         ...(totp ? { 'X-Admin-TOTP': totp } : {}),
         ...(recovery ? { 'X-Admin-Recovery': recovery } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
       cache: 'no-store',
       keepalive,
+      signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
     })
   } catch {
     throw new Error('The secure service could not be reached. Please try again.')
@@ -392,95 +432,66 @@ async function request(path, { method = 'GET', body, token, keepalive = false, t
   return payload
 }
 
-// Module-level current admin TOTP code. Set by the admin dashboard
-// whenever the user enters a fresh 6-digit code, cleared after 5 minutes
-// of inactivity. Every request() call below automatically injects it
-// into the X-Admin-TOTP header if the path is an admin route.
-//
-// Persistence: stored in sessionStorage so a page refresh keeps the
-// user signed in for the 5-minute window, but a closed tab clears it.
-// Using sessionStorage (not localStorage) means the code never survives
-// across browser sessions; using it (not memory-only) means a refresh
-// or accidental nav-back does not force the user to re-type the code
-// they just entered.
-const ADMIN_TOTP_STORAGE_KEY = 'runway.admin.totp.v1'
-const ADMIN_TOTP_TTL_MS = 5 * 60 * 1000
+// A verified, signed admin challenge is cached for the five-minute elevation
+// window. Raw authenticator and recovery codes are never persisted.
+const ADMIN_CHALLENGE_STORAGE_KEY = 'runway.admin.challenge.v1'
+const ADMIN_CHALLENGE_EVENT = 'runway-admin-challenge-change'
+let memoryChallenge = null
 
-function readStoredTotp() {
-  if (typeof window === 'undefined' || !window.sessionStorage) return ''
+function readStoredChallenge() {
+  if (typeof window === 'undefined' || !window.sessionStorage) return null
   try {
-    const raw = window.sessionStorage.getItem(ADMIN_TOTP_STORAGE_KEY)
-    if (!raw) return ''
-    const parsed = JSON.parse(raw)
-    if (!parsed || typeof parsed !== 'object') return ''
-    if (typeof parsed.code !== 'string' || typeof parsed.expiresAt !== 'number') return ''
-    if (Date.now() > parsed.expiresAt) {
-      window.sessionStorage.removeItem(ADMIN_TOTP_STORAGE_KEY)
-      return ''
+    const parsed = JSON.parse(window.sessionStorage.getItem(ADMIN_CHALLENGE_STORAGE_KEY) || 'null')
+    if (!parsed?.challenge || !parsed?.expiresAt || Date.now() >= parsed.expiresAt) {
+      window.sessionStorage.removeItem(ADMIN_CHALLENGE_STORAGE_KEY)
+      return null
     }
-    return parsed.code
+    return parsed
   } catch {
-    return ''
+    return null
   }
 }
 
-function writeStoredTotp(code) {
-  if (typeof window === 'undefined' || !window.sessionStorage) return
+export function setActiveAdminChallenge(challenge, expiresAt) {
+  const expiry = typeof expiresAt === 'number' ? expiresAt : Date.parse(expiresAt || '')
+  const value = challenge && Number.isFinite(expiry) && expiry > Date.now()
+    ? { challenge: String(challenge), expiresAt: expiry }
+    : null
+  memoryChallenge = value
   try {
-    if (!code) {
-      window.sessionStorage.removeItem(ADMIN_TOTP_STORAGE_KEY)
-      return
-    }
-    window.sessionStorage.setItem(ADMIN_TOTP_STORAGE_KEY, JSON.stringify({
-      code,
-      expiresAt: Date.now() + ADMIN_TOTP_TTL_MS,
-    }))
-  } catch {
-    // sessionStorage may be disabled (private mode quota, etc). The
-    // in-memory value below is still used for the current page load.
-  }
+    if (value) window.sessionStorage.setItem(ADMIN_CHALLENGE_STORAGE_KEY, JSON.stringify(value))
+    else window.sessionStorage.removeItem(ADMIN_CHALLENGE_STORAGE_KEY)
+    window.dispatchEvent(new CustomEvent(ADMIN_CHALLENGE_EVENT, { detail: value }))
+  } catch { /* memory fallback remains available */ }
+  return value?.challenge || ''
 }
 
-let memoryTotp = ''
-let memoryTotpExpiresAt = 0
-function readMemoryTotp() {
-  if (!memoryTotp) return ''
-  if (Date.now() > memoryTotpExpiresAt) {
-    memoryTotp = ''
-    memoryTotpExpiresAt = 0
-    return ''
-  }
-  return memoryTotp
-}
-function writeMemoryTotp(code) {
-  memoryTotp = code
-  memoryTotpExpiresAt = code ? Date.now() + ADMIN_TOTP_TTL_MS : 0
-}
-
-export function setActiveAdminTotp(code) {
-  const normalised = String(code || '').replace(/\D/g, '').slice(0, 6)
-  writeStoredTotp(normalised)
-  writeMemoryTotp(normalised)
-  return normalised
-}
-
-export function getActiveAdminTotp() {
-  // sessionStorage is the source of truth across reloads; the in-memory
-  // copy covers the same-tab fast path and the no-storage fallback.
-  const stored = readStoredTotp()
+export function getActiveAdminChallenge() {
+  const stored = readStoredChallenge()
   if (stored) {
-    writeMemoryTotp(stored)
-    return stored
+    memoryChallenge = stored
+    return stored.challenge
   }
-  const fromMemory = readMemoryTotp()
-  if (!fromMemory) {
-    writeMemoryTotp('')
+  if (!memoryChallenge || Date.now() >= memoryChallenge.expiresAt) {
+    memoryChallenge = null
     return ''
   }
-  return fromMemory
+  return memoryChallenge.challenge
 }
+
+export function subscribeAdminChallenge(listener) {
+  const handler = () => listener(Boolean(getActiveAdminChallenge()))
+  window.addEventListener(ADMIN_CHALLENGE_EVENT, handler)
+  return () => window.removeEventListener(ADMIN_CHALLENGE_EVENT, handler)
+}
+
 function isAdminPath(path) {
   return typeof path === 'string' && path.startsWith('/admin/')
+}
+
+function isAdminMutation(path, method) {
+  if (!isAdminPath(path) || ['GET', 'HEAD', 'OPTIONS'].includes(String(method).toUpperCase())) return false
+  return !['/admin/totp/challenge', '/admin/totp/enrol', '/admin/totp/verify'].includes(path)
 }
 
 function requireRemoteApi() {
@@ -537,6 +548,12 @@ export async function verifyCheckoutSession(sessionId, { token } = {}) {
   requireRemoteApi()
   if (!sessionId || !token) throw new Error('A signed-in account and Checkout Session are required.')
   return request(`/checkout/session/${encodeURIComponent(sessionId)}`, { token })
+}
+
+export async function claimComplimentaryAccess(claimToken, { token } = {}) {
+  requireRemoteApi()
+  if (!claimToken || !token) throw new Error('A private invitation and verified sign-in are required.')
+  return request('/complimentary/claim', { method: 'POST', token, body: { token: claimToken } })
 }
 
 export async function getAccountPurchases({ token } = {}) {
@@ -890,20 +907,26 @@ export async function getAdminTOTPStatus({ token } = {}) {
   return { enrolled: false, verified: false, enrolledAt: '', lastUsedAt: '' }
 }
 
-export async function enrollAdminTOTP({ token, totp } = {}) {
-  if (API_BASE_URL) return request('/admin/totp/enrol', { method: 'POST', body: {}, token, totp })
+export async function createAdminTOTPChallenge({ code = '', recoveryCode = '' } = {}, { token } = {}) {
+  if (API_BASE_URL) return request('/admin/totp/challenge', { method: 'POST', body: { code, recoveryCode }, token })
+  await wait()
+  return { challenge: 'preview-admin-challenge', expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString() }
+}
+
+export async function enrollAdminTOTP({ token } = {}) {
+  if (API_BASE_URL) return request('/admin/totp/enrol', { method: 'POST', body: {}, token })
   await wait()
   return { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/Runway%20Systems%20Admin?secret=JBSWY3DPEHPK3PXP&issuer=Runway%20Systems', recoveryCodes: ['0000-1111', '2222-3333'] }
 }
 
-export async function verifyAdminTOTP(body, { token, totp } = {}) {
-  if (API_BASE_URL) return request('/admin/totp/verify', { method: 'POST', body, token, totp })
+export async function verifyAdminTOTP(body, { token } = {}) {
+  if (API_BASE_URL) return request('/admin/totp/verify', { method: 'POST', body, token })
   await wait()
   return { verified: true }
 }
 
-export async function resetAdminTOTP({ token, totp } = {}) {
-  if (API_BASE_URL) return request('/admin/totp/reset', { method: 'POST', body: {}, token, totp })
+export async function resetAdminTOTP({ token } = {}) {
+  if (API_BASE_URL) return request('/admin/totp/reset', { method: 'POST', body: {}, token })
   await wait()
   return { reset: true }
 }
@@ -929,6 +952,102 @@ export async function getAdminClientErrors({ limit = 50 } = {}, { token } = {}) 
   return []
 }
 
+export async function getAdminComplimentaryGrants({ status = '', search = '', limit = 100 } = {}, { token } = {}) {
+  if (API_BASE_URL) {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (status) params.set('status', status)
+    if (search) params.set('search', search)
+    return request(`/admin/complimentary-grants?${params.toString()}`, { token })
+  }
+  await wait()
+  const state = readMockState()
+  let grants = state.complimentaryGrants || []
+  if (status) grants = grants.filter((grant) => grant.status === status)
+  if (search) grants = grants.filter((grant) => grant.recipientEmail.includes(search.toLowerCase()))
+  const all = state.complimentaryGrants || []
+  return {
+    grants: grants.slice(0, limit),
+    stats: {
+      total: all.length,
+      pending: all.filter((grant) => grant.status === 'pending').length,
+      claimed: all.filter((grant) => grant.status === 'claimed').length,
+      revoked: all.filter((grant) => grant.status === 'revoked').length,
+    },
+  }
+}
+
+export async function createAdminComplimentaryGrant({ email, productKeys, idempotencyKey } = {}, { token } = {}) {
+  if (API_BASE_URL) return request('/admin/complimentary-grants', { method: 'POST', token, body: { email, productKeys, idempotencyKey } })
+  await wait(250)
+  const state = readMockState()
+  const now = new Date().toISOString()
+  const grant = {
+    id: makeId('complimentary'),
+    recipientEmail: String(email || '').trim().toLowerCase(),
+    status: 'pending',
+    products: (productKeys || []).map((productKey) => ({ productKey, productName: friendlyMockProductName(state, productKey), purchaseId: '', status: 'pending' })),
+    emailStatus: 'sent',
+    emailAttempts: 1,
+    emailSentAt: now,
+    emailLastError: '',
+    tokenExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    claimedAt: '',
+    reviewInvitedAt: '',
+    revokedAt: '',
+    createdAt: now,
+    updatedAt: now,
+  }
+  state.complimentaryGrants = [grant, ...(state.complimentaryGrants || [])]
+  writeMockState(state)
+  return { duplicate: false, grant, skippedProductKeys: [] }
+}
+
+export async function resendAdminComplimentaryGrant(grantId, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/complimentary-grants/${encodeURIComponent(grantId)}/resend`, { method: 'POST', token, body: {} })
+  await wait()
+  const state = readMockState()
+  const grant = (state.complimentaryGrants || []).find((item) => item.id === grantId)
+  if (!grant) throw new Error('Complimentary invitation not found')
+  Object.assign(grant, { status: 'pending', emailStatus: 'sent', emailAttempts: 1, emailSentAt: new Date().toISOString(), tokenExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() })
+  writeMockState(state)
+  return { grant }
+}
+
+export async function cancelAdminComplimentaryGrant(grantId, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/complimentary-grants/${encodeURIComponent(grantId)}/cancel`, { method: 'POST', token, body: {} })
+  await wait()
+  const state = readMockState()
+  const grant = (state.complimentaryGrants || []).find((item) => item.id === grantId)
+  if (!grant) throw new Error('Complimentary invitation not found')
+  grant.status = 'cancelled'
+  grant.updatedAt = new Date().toISOString()
+  writeMockState(state)
+  return { cancelled: true, grantId }
+}
+
+export async function revokeAdminComplimentaryGrant(grantId, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/complimentary-grants/${encodeURIComponent(grantId)}/revoke`, { method: 'POST', token, body: {} })
+  await wait()
+  const state = readMockState()
+  const grant = (state.complimentaryGrants || []).find((item) => item.id === grantId)
+  if (!grant) throw new Error('Complimentary access not found')
+  grant.status = 'revoked'
+  grant.revokedAt = new Date().toISOString()
+  writeMockState(state)
+  return { revoked: true, grantId }
+}
+
+export async function sendComplimentaryReviewInvite(grantId, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/complimentary-grants/${encodeURIComponent(grantId)}/review-invite`, { method: 'POST', token, body: {} })
+  await wait()
+  const state = readMockState()
+  const grant = (state.complimentaryGrants || []).find((item) => item.id === grantId)
+  if (!grant) throw new Error('Complimentary access not found')
+  grant.reviewInvitedAt = new Date().toISOString()
+  writeMockState(state)
+  return { queued: true, totalQueued: grant.products.length, grantId }
+}
+
 export async function getAdminDeliveryIssues({ token } = {}) {
   if (API_BASE_URL) return request('/admin/delivery-issues', { token })
   await wait()
@@ -945,11 +1064,12 @@ export async function retryDeliveryIssue(purchaseId, { token } = {}) {
   return { retried: true, purchaseId }
 }
 
-export async function subscribeWaitlist(productKey, { email, userId = '', source = 'product_page' } = {}) {
+export async function subscribeWaitlist(productKey, { email, source = 'product_page', marketingOptIn = false } = {}, { token } = {}) {
   if (API_BASE_URL) {
     return request('/waitlist/subscribe', {
       method: 'POST',
-      body: { productKey, email, userId, source },
+      token,
+      body: { productKey, email, source, marketingOptIn: marketingOptIn === true },
     })
   }
   await wait(200)
@@ -962,8 +1082,9 @@ export async function subscribeWaitlist(productKey, { email, userId = '', source
       id: `wl-${Date.now()}`,
       productKey,
       email: cleanEmail,
-      userId,
+      userId: '',
       source,
+      marketingOptIn,
       pollResponse: '',
       welcomeSentAt: new Date().toISOString(),
       notifiedAt: null,
@@ -973,6 +1094,7 @@ export async function subscribeWaitlist(productKey, { email, userId = '', source
   }
   const product = (mockAllProducts(state) || []).find((p) => p.key === productKey)
   const pollConfig = product?.waitlistConfig?.pollEnabled ? {
+    token: existing?.id || waitlist.at(-1)?.id || 'preview-poll-token',
     question: product.waitlistConfig.pollQuestion || 'Which feature is most critical for your business?',
     options: Array.isArray(product.waitlistConfig.pollOptions) && product.waitlistConfig.pollOptions.length
       ? product.waitlistConfig.pollOptions
@@ -985,17 +1107,17 @@ export async function subscribeWaitlist(productKey, { email, userId = '', source
   }
 }
 
-export async function voteWaitlistPoll(productKey, { email, vote } = {}) {
+export async function voteWaitlistPoll(productKey, { token, vote } = {}) {
   if (API_BASE_URL) {
     return request('/waitlist/poll-vote', {
       method: 'POST',
-      body: { productKey, email, vote },
+      body: { productKey, token, vote },
     })
   }
   await wait(150)
   const state = readMockState()
   const waitlist = (state.waitlist || []).map((item) => {
-    if (item.productKey === productKey && item.email === String(email || '').toLowerCase().trim()) {
+    if (item.productKey === productKey && item.id === token) {
       return { ...item, pollResponse: vote }
     }
     return item
@@ -1034,16 +1156,14 @@ export async function getAdminProductWaitlist(productKey, { token, totp } = {}) 
   }
 }
 
-export async function exportAdminProductWaitlist(productKey, { token, totp } = {}) {
+export async function exportAdminProductWaitlist(productKey, { token } = {}) {
   if (API_BASE_URL) {
     const url = `${API_BASE_URL}/admin/products/${encodeURIComponent(productKey)}/waitlist/export`
-    const activeTotp = !totp ? getActiveAdminTotp() : ''
     const response = await fetch(url, {
       headers: {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(activeTotp ? { 'X-Admin-TOTP': activeTotp } : {}),
-        ...(totp ? { 'X-Admin-TOTP': totp } : {}),
       },
+      signal: AbortSignal.timeout(12000),
     })
     if (!response.ok) throw new Error('Failed to export waitlist')
     return response.text()
@@ -1051,16 +1171,15 @@ export async function exportAdminProductWaitlist(productKey, { token, totp } = {
   await wait(100)
   const state = readMockState()
   const list = (state.waitlist || []).filter((w) => w.productKey === productKey)
-  const escapeCsv = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`
   const lines = ['Email,Source,Poll Response,Welcome Sent At,Notified At,Signed Up At']
   for (const r of list) {
     lines.push([
-      escapeCsv(r.email),
-      escapeCsv(r.source),
-      escapeCsv(r.pollResponse),
-      escapeCsv(r.welcomeSentAt),
-      escapeCsv(r.notifiedAt),
-      escapeCsv(r.createdAt),
+      escapeCsvCell(r.email),
+      escapeCsvCell(r.source),
+      escapeCsvCell(r.pollResponse),
+      escapeCsvCell(r.welcomeSentAt),
+      escapeCsvCell(r.notifiedAt),
+      escapeCsvCell(r.createdAt),
     ].join(','))
   }
   return lines.join('\n')
@@ -1079,13 +1198,13 @@ export async function sendTestWaitlistEmail(productKey, { subject = '', message 
   return { ok: true, message: 'Test email simulated successfully.' }
 }
 
-export async function broadcastLaunchEmail(productKey, { subject = '', message = '' } = {}, { token, totp } = {}) {
+export async function broadcastLaunchEmail(productKey, { subject = '', message = '', idempotencyKey = '' } = {}, { token, totp } = {}) {
   if (API_BASE_URL) {
     return request(`/admin/products/${encodeURIComponent(productKey)}/waitlist/broadcast`, {
       method: 'POST',
       token,
       totp,
-      body: { subject, message },
+      body: { subject, message, idempotencyKey },
     })
   }
   await wait(400)
@@ -1213,16 +1332,14 @@ export async function getAdminAudience({ segment = 'all', search = '', product =
   }
 }
 
-export async function exportAdminAudienceCsv({ segment = 'all' } = {}, { token, totp } = {}) {
+export async function exportAdminAudienceCsv({ segment = 'all' } = {}, { token } = {}) {
   if (API_BASE_URL) {
     const url = `${API_BASE_URL}/admin/marketing/audience/export?segment=${encodeURIComponent(segment)}`
-    const activeTotp = !totp ? getActiveAdminTotp() : ''
     const response = await fetch(url, {
       headers: {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(activeTotp ? { 'X-Admin-TOTP': activeTotp } : {}),
-        ...(totp ? { 'X-Admin-TOTP': totp } : {}),
       },
+      signal: AbortSignal.timeout(12000),
     })
     if (!response.ok) throw new Error('Failed to export audience CSV')
     return response.text()
@@ -1235,7 +1352,6 @@ export async function exportAdminAudienceCsv({ segment = 'all' } = {}, { token, 
   else if (segment === 'waitlist') list = list.filter((c) => Array.isArray(c.waitlistsJoined) && c.waitlistsJoined.length > 0)
   else if (segment === 'unsubscribed') list = list.filter((c) => c.status === 'unsubscribed')
 
-  const escapeCsv = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`
   const lines = ['Email,Name,Source,Status,Segment,Total Spend (USD),Orders Count,Products Owned,Waitlists,Joined At,Last Seen At']
   for (const r of list) {
     const owned = (r.productsOwned || []).join('; ')
@@ -1243,17 +1359,17 @@ export async function exportAdminAudienceCsv({ segment = 'all' } = {}, { token, 
     const spend = ((r.totalSpendCents || 0) / 100).toFixed(2)
     const seg = r.isCustomer ? 'Customer' : 'Lead'
     lines.push([
-      escapeCsv(r.email),
-      escapeCsv(r.name),
-      escapeCsv(r.source),
-      escapeCsv(r.status),
-      escapeCsv(seg),
-      escapeCsv(`$${spend}`),
-      escapeCsv(r.ordersCount || 0),
-      escapeCsv(owned),
-      escapeCsv(waitlists),
-      escapeCsv(r.createdAt),
-      escapeCsv(r.lastSeenAt),
+      escapeCsvCell(r.email),
+      escapeCsvCell(r.name),
+      escapeCsvCell(r.source),
+      escapeCsvCell(r.status),
+      escapeCsvCell(seg),
+      escapeCsvCell(`$${spend}`),
+      escapeCsvCell(r.ordersCount || 0),
+      escapeCsvCell(owned),
+      escapeCsvCell(waitlists),
+      escapeCsvCell(r.createdAt),
+      escapeCsvCell(r.lastSeenAt),
     ].join(','))
   }
   return lines.join('\n')
@@ -1385,4 +1501,233 @@ export async function unsubscribeMarketingContact({ email } = {}) {
   return { ok: true }
 }
 
+// Blog newsletter ----------------------------------------------------------
+export async function subscribeBlogNewsletter({ email, consent, source = 'site_footer', company = '' } = {}) {
+  if (API_BASE_URL) return request('/newsletter/subscribe', { method: 'POST', body: { email, consent, source, company } })
+  await wait(180)
+  if (company) return { accepted: true, message: 'Check your inbox. A confirmation message is on its way if this address can receive Blog emails.' }
+  if (consent !== true) throw new Error('Confirm that you want to receive Runway Systems Blog emails')
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim())) throw new Error('Please enter a valid email address')
+  return { accepted: true, message: 'Check your inbox. A confirmation message is on its way if this address can receive Blog emails.' }
+}
 
+export async function confirmBlogNewsletter(token) {
+  if (API_BASE_URL) return request('/newsletter/confirm', { method: 'POST', body: { token } })
+  await wait(180)
+  if (!/^[A-Za-z0-9_-]{40,100}$/.test(String(token || ''))) throw new Error('This confirmation link is invalid or expired')
+  return { confirmed: true, message: 'You are subscribed to Runway Systems Blog email updates.' }
+}
+
+// Runway Systems Blog ------------------------------------------------------
+export function resolveBlogMedia(path) {
+  if (!path || /^data:|^https?:/i.test(path)) return path || ''
+  return API_BASE_URL ? `${API_BASE_URL}${path}` : path
+}
+
+export async function getPublicBlogCategories() {
+  if (API_BASE_URL) return request('/blog/categories')
+  await wait(80)
+  return { categories: clone(readMockState().blogCategories.filter((category) => category.active)) }
+}
+
+export async function getPublicBlogPosts({ limit = 12, cursor = '', category = '', tag = '', search = '' } = {}) {
+  if (API_BASE_URL) {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (cursor) params.set('cursor', cursor)
+    if (category) params.set('category', category)
+    if (tag) params.set('tag', tag)
+    if (search) params.set('search', search)
+    return request(`/blog/posts?${params}`)
+  }
+  await wait(100)
+  let posts = readMockState().blogPosts.filter((post) => post.status === 'published' && !post.deletedAt)
+  if (category) posts = posts.filter((post) => post.category?.slug === category)
+  if (tag) posts = posts.filter((post) => post.tags.some((value) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-') === tag))
+  if (search) posts = posts.filter((post) => `${post.title} ${post.excerpt}`.toLowerCase().includes(search.toLowerCase()))
+  posts.sort((a, b) => Number(b.featured) - Number(a.featured) || Date.parse(b.publishedAt) - Date.parse(a.publishedAt))
+  return { posts: clone(posts.slice(0, limit).map(({ bodyMarkdown: _body, ...post }) => post)), hasMore: false, nextCursor: '' }
+}
+
+export async function getPublicBlogPost(slug) {
+  if (API_BASE_URL) return request(`/blog/posts/${encodeURIComponent(slug)}`)
+  await wait(100)
+  const posts = readMockState().blogPosts.filter((post) => post.status === 'published' && !post.deletedAt)
+  const post = posts.find((item) => item.slug === slug)
+  if (!post) throw new Error('Article not found')
+  const relatedPosts = posts.filter((item) => item.id !== post.id).sort((a, b) => Number(b.category?.id === post.category?.id) - Number(a.category?.id === post.category?.id)).slice(0, 3).map(({ bodyMarkdown: _body, ...item }) => item)
+  return { post: clone(post), relatedPosts: clone(relatedPosts) }
+}
+
+export async function getAdminBlogPosts({ status = '', search = '', trashed = false, token } = {}) {
+  if (API_BASE_URL) {
+    const params = new URLSearchParams()
+    if (status) params.set('status', status)
+    if (search) params.set('search', search)
+    if (trashed) params.set('trashed', 'true')
+    return request(`/admin/blog/posts?${params}`, { token })
+  }
+  await wait(80)
+  let posts = readMockState().blogPosts.filter((post) => Boolean(post.deletedAt) === Boolean(trashed))
+  if (status) posts = posts.filter((post) => post.status === status)
+  if (search) posts = posts.filter((post) => `${post.title} ${post.slug}`.toLowerCase().includes(search.toLowerCase()))
+  return { posts: clone(posts.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).map(({ bodyMarkdown: _body, ...post }) => post)) }
+}
+
+export async function getAdminBlogPost(id, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/posts/${encodeURIComponent(id)}`, { token })
+  await wait(60)
+  const post = readMockState().blogPosts.find((item) => item.id === id)
+  if (!post) throw new Error('Article not found')
+  return { post: clone(post) }
+}
+
+export async function getAdminBlogCategories({ token } = {}) {
+  if (API_BASE_URL) return request('/admin/blog/categories', { token })
+  await wait(50)
+  return { categories: clone(readMockState().blogCategories) }
+}
+
+export async function createAdminBlogCategory(input, { token } = {}) {
+  if (API_BASE_URL) return request('/admin/blog/categories', { method: 'POST', token, body: input })
+  const state = readMockState()
+  state.blogCategories.push({ id: makeId('category'), slug: String(input.slug || input.name).toLowerCase().replace(/[^a-z0-9]+/g, '-'), name: input.name, description: input.description || '', active: true, publishedCount: 0 })
+  writeMockState(state)
+  return { categories: clone(state.blogCategories) }
+}
+
+export async function updateAdminBlogCategory(id, input, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/categories/${encodeURIComponent(id)}`, { method: 'PATCH', token, body: input })
+  const state = readMockState()
+  const index = state.blogCategories.findIndex((category) => category.id === id)
+  if (index < 0) throw new Error('Category not found')
+  state.blogCategories[index] = {
+    ...state.blogCategories[index], ...input,
+    slug: String(input.slug || state.blogCategories[index].slug).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
+    active: input.active !== false,
+  }
+  writeMockState(state)
+  return { categories: clone(state.blogCategories) }
+}
+
+function mockBlogDraft(input, current = null, categories = seedBlogCategories) {
+  const now = new Date().toISOString()
+  const category = categories.find((item) => item.id === input.categoryId) || current?.category || null
+  const bodyMarkdown = String(input.bodyMarkdown ?? current?.bodyMarkdown ?? '')
+  return {
+    id: current?.id || makeId('blog'), slug: String(input.slug || input.title || 'untitled-article').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
+    title: String(input.title || current?.title || 'Untitled article'), excerpt: String(input.excerpt ?? current?.excerpt ?? ''), bodyMarkdown,
+    status: current?.status || 'draft', layout: input.layout || current?.layout || 'editorial', category,
+    tags: Array.isArray(input.tags) ? input.tags : String(input.tags || '').split(',').map((tag) => tag.trim()).filter(Boolean),
+    authorName: input.authorName || current?.authorName || 'Runway Systems', cover: input.coverMediaId ? null : current?.cover || null,
+    coverMediaId: input.coverMediaId || current?.cover?.id || '', seoTitle: input.seoTitle ?? current?.seoTitle ?? '', seoDescription: input.seoDescription ?? current?.seoDescription ?? '',
+    featured: Boolean(input.featured), scheduledAt: current?.scheduledAt || '', firstPublishedAt: current?.firstPublishedAt || '', publishedAt: current?.publishedAt || '',
+    version: (current?.version || 0) + 1, createdAt: current?.createdAt || now, updatedAt: now, readingMinutes: Math.max(1, Math.ceil(bodyMarkdown.split(/\s+/).filter(Boolean).length / 220)), deletedAt: current?.deletedAt || '',
+  }
+}
+
+export async function createAdminBlogPost(input, { token } = {}) {
+  if (API_BASE_URL) return request('/admin/blog/posts', { method: 'POST', token, body: input })
+  const state = readMockState()
+  const post = mockBlogDraft(input, null, state.blogCategories)
+  state.blogPosts.unshift(post)
+  writeMockState(state)
+  return { post: clone(post) }
+}
+
+export async function importAdminBlogPost(input, { token } = {}) {
+  if (API_BASE_URL) return request('/admin/blog/import', { method: 'POST', token, body: input })
+  let content = String(input.content || '')
+  if (input.format === 'html' && typeof DOMParser !== 'undefined') content = new DOMParser().parseFromString(content, 'text/html').body.textContent || ''
+  const title = input.title || content.match(/^#\s+(.+)$/m)?.[1] || 'Imported article'
+  const result = await createAdminBlogPost({ title, bodyMarkdown: content.replace(/^#\s+.+$/m, '').trim(), layout: input.layout || 'editorial' })
+  return { ...result, warnings: ['Review AI-created facts, citations, links, and image rights before publishing.'] }
+}
+
+export async function updateAdminBlogPost(id, input, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/posts/${encodeURIComponent(id)}`, { method: 'PATCH', token, body: input })
+  const state = readMockState()
+  const index = state.blogPosts.findIndex((post) => post.id === id)
+  if (index < 0) throw new Error('Article not found')
+  if (Number(input.version) !== Number(state.blogPosts[index].version)) throw new Error('This article changed in another tab. Reload before saving.')
+  const post = mockBlogDraft(input, state.blogPosts[index], state.blogCategories)
+  if (post.coverMediaId) post.cover = state.blogMedia.find((item) => item.id === post.coverMediaId) || post.cover
+  state.blogPosts[index] = post
+  writeMockState(state)
+  return { post: clone(post) }
+}
+
+export async function transitionAdminBlogPost(id, action, input = {}, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/posts/${encodeURIComponent(id)}/${action}`, { method: 'POST', token, body: input })
+  const state = readMockState()
+  const index = state.blogPosts.findIndex((post) => post.id === id)
+  if (index < 0) throw new Error('Article not found')
+  const current = state.blogPosts[index]
+  if (Number(input.version) !== Number(current.version)) throw new Error('This article changed. Reload before continuing.')
+  const now = new Date().toISOString()
+  const next = { ...current, version: current.version + 1, updatedAt: now }
+  if (action === 'publish') Object.assign(next, { status: 'published', publishedAt: now, firstPublishedAt: current.firstPublishedAt || now, scheduledAt: '', deletedAt: '' })
+  if (action === 'schedule') Object.assign(next, { status: 'scheduled', scheduledAt: input.scheduledAt })
+  if (action === 'unpublish' || action === 'cancel-schedule') Object.assign(next, { status: 'draft', scheduledAt: '' })
+  if (action === 'archive') Object.assign(next, { status: 'archived', scheduledAt: '' })
+  if (action === 'trash') Object.assign(next, { status: 'archived', scheduledAt: '', deletedAt: now })
+  if (action === 'restore') Object.assign(next, { status: 'draft', scheduledAt: '', deletedAt: '' })
+  state.blogRevisions.unshift({ id: makeId('revision'), postId: id, version: current.version, reason: action, created_at: now })
+  state.blogPosts[index] = next
+  writeMockState(state)
+  return { post: clone(next) }
+}
+
+export async function changeAdminBlogSlug(id, input, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/posts/${encodeURIComponent(id)}/change-slug`, { method: 'POST', token, body: input })
+  return updateAdminBlogPost(id, { ...readMockState().blogPosts.find((post) => post.id === id), ...input }, { token })
+}
+
+export async function getAdminBlogRevisions(id, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/posts/${encodeURIComponent(id)}/revisions`, { token })
+  return { revisions: clone(readMockState().blogRevisions.filter((revision) => revision.postId === id)) }
+}
+
+export async function restoreAdminBlogRevision(id, revisionId, input, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/posts/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/restore`, { method: 'POST', token, body: input })
+  return getAdminBlogPost(id, { token })
+}
+
+export async function permanentlyDeleteAdminBlogPost(id, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/posts/${encodeURIComponent(id)}/permanent`, { method: 'DELETE', token })
+  const state = readMockState()
+  const post = state.blogPosts.find((item) => item.id === id)
+  if (!post) throw new Error('Article not found')
+  if (!post.deletedAt) throw new Error('Move this article to trash first')
+  state.blogPosts = state.blogPosts.filter((item) => item.id !== id)
+  state.blogRevisions = state.blogRevisions.filter((revision) => revision.postId !== id)
+  writeMockState(state)
+  return { removed: true, id }
+}
+
+export async function getAdminBlogMedia({ token } = {}) {
+  if (API_BASE_URL) return request('/admin/blog/media', { token })
+  return { media: clone(readMockState().blogMedia) }
+}
+
+export async function uploadAdminBlogMedia(input, { token } = {}) {
+  if (API_BASE_URL) return request('/admin/blog/media', { method: 'POST', token, body: input })
+  const state = readMockState()
+  const media = { id: crypto.randomUUID(), path: input.image, mimeType: 'image/webp', byteSize: input.image.length, width: 1600, height: 1000, altText: input.altText || '', caption: input.caption || '', originalName: input.originalName || '', status: 'ready', usageCount: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+  state.blogMedia.unshift(media)
+  writeMockState(state)
+  return { media: clone(media), duplicate: false }
+}
+
+export async function updateAdminBlogMedia(id, input, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/media/${encodeURIComponent(id)}`, { method: 'PATCH', token, body: input })
+  const state = readMockState(); const index = state.blogMedia.findIndex((item) => item.id === id)
+  if (index < 0) throw new Error('Media not found')
+  state.blogMedia[index] = { ...state.blogMedia[index], ...input, updatedAt: new Date().toISOString() }
+  writeMockState(state); return { media: clone(state.blogMedia[index]) }
+}
+
+export async function deleteAdminBlogMedia(id, { token } = {}) {
+  if (API_BASE_URL) return request(`/admin/blog/media/${encodeURIComponent(id)}`, { method: 'DELETE', token })
+  const state = readMockState(); state.blogMedia = state.blogMedia.filter((item) => item.id !== id); writeMockState(state)
+  return { removed: true, id }
+}

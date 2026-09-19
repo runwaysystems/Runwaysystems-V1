@@ -7,8 +7,6 @@
 // falls through to the generated static sitemap instead of the React app's 404
 // page.
 
-const DEFAULT_API_BASE_URL = 'https://cashflow-os-platform.runwaysystems-cloud.workers.dev'
-
 const XML_HEADERS = {
   'Content-Type': 'application/xml; charset=utf-8',
   'X-Content-Type-Options': 'nosniff',
@@ -16,7 +14,7 @@ const XML_HEADERS = {
 
 function sitemapSourceUrl(env, requestUrl) {
   const explicit = String(env.SITEMAP_SOURCE_URL || '').trim()
-  const apiBase = String(env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).trim().replace(/\/+$/, '')
+  const apiBase = String(env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '')
   const raw = explicit || (apiBase ? `${apiBase}/sitemap.xml` : '')
   if (!raw) return null
 
@@ -52,6 +50,7 @@ export async function onRequestGet(context) {
   try {
     const upstream = await fetch(source, {
       headers: { Accept: 'application/xml, text/xml;q=0.9, */*;q=0.1' },
+      signal: AbortSignal.timeout(5000),
     })
     const text = await upstream.text()
     if (!upstream.ok || !looksLikeSitemapXml(text)) return staticSitemap(context)

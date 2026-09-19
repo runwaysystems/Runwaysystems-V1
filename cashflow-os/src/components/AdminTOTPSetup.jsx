@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ShieldCheck } from 'lucide-react'
-import { enrollAdminTOTP, getAdminTOTPStatus, resetAdminTOTP, verifyAdminTOTP } from '../api/platformApi'
+import { enrollAdminTOTP, getAdminTOTPStatus, resetAdminTOTP, setActiveAdminChallenge, verifyAdminTOTP } from '../api/platformApi'
 import { useAuth } from '../context/AuthContext'
 
 // Renders the 2FA enrolment and code-entry UI for admin mutations. Owns
@@ -21,7 +21,7 @@ export default function AdminTOTPSetup() {
     setLoading(true)
     setError('')
     try {
-      setStatus(await getAdminTOTPStatus({ token: session.access_token, totp: localStorage.getItem(`runway.admin.totp.${session.user?.id}`) || '' }))
+      setStatus(await getAdminTOTPStatus({ token: session.access_token }))
     } catch (loadError) {
       setError(loadError.message || '2FA status could not be loaded.')
     } finally {
@@ -37,7 +37,7 @@ export default function AdminTOTPSetup() {
     setInfo('')
     setEnrolment(null)
     try {
-      const result = await enrollAdminTOTP({ token: session.access_token, totp: localStorage.getItem(`runway.admin.totp.${session.user?.id}`) || '' })
+      const result = await enrollAdminTOTP({ token: session.access_token })
       setEnrolment(result)
     } catch (enrolError) {
       setError(enrolError.message || '2FA enrolment could not start.')
@@ -54,8 +54,9 @@ export default function AdminTOTPSetup() {
     setLoading(true)
     setError('')
     try {
-      await verifyAdminTOTP({ code: code.trim() }, { token: session.access_token, totp: code.trim() })
-      setInfo('Two-factor authentication is now active for admin actions.')
+      const result = await verifyAdminTOTP({ code: code.trim() }, { token: session.access_token })
+      setActiveAdminChallenge(result.challenge, result.expiresAt)
+      setInfo('Two-factor authentication is active and this tab is verified for five minutes.')
       setEnrolment(null)
       setCode('')
       await loadStatus()
@@ -71,8 +72,9 @@ export default function AdminTOTPSetup() {
     setLoading(true)
     setError('')
     try {
-      await resetAdminTOTP({ token: session.access_token, totp: localStorage.getItem(`runway.admin.totp.${session.user?.id}`) || '' })
-      setInfo('2FA reset. You can enrol again now.')
+      await resetAdminTOTP({ token: session.access_token })
+      setActiveAdminChallenge('', 0)
+      setInfo('2FA reset. Enrol again before making any other admin changes.')
       setEnrolment(null)
       setCode('')
       await loadStatus()

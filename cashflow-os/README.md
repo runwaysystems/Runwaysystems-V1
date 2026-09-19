@@ -9,6 +9,8 @@ Production-oriented React and Vite storefront for the **Runway Systems** suite, 
 - Suite homepage with a real-time 3D runway hero background: a glowing perspective grid with streaming centerline lights, edge lights, and gold particles, with pointer parallax, palette-aware colors, reduced-motion and no-WebGL fallbacks, and a product catalog plus one premium landing page per product (`/products/:key`)
 - Cookie and storage consent banner: essential storefront storage and anonymous page counts stay on, while the optional Trustpilot widget only loads after acceptance, with a footer Cookie preferences link to change the choice anytime
 - Content studio in the owner dashboard: every storefront text is editable without a deploy - suite homepage copy, per-product marketing content (hero, ticker, problem/solution, tour, features, steps, benefits, audiences, pricing, FAQs, final CTA), per-product and homepage SEO metadata, legal policies, support email, the Trustpilot business unit ID, and a Site copy tab covering the footer brand lines, cart labels, checkout and success wording, sign-in modal, 404 page, and navigation buttons
+- Runway Systems Blog publishing studio: visual and Markdown editing, safe AI text/Markdown/HTML imports, local recovery plus optimistic autosave, reusable validated R2 media, responsive page preview, scheduling, immutable revisions, restore, archive, recoverable trash, permanent slug redirects, and owner-only lifecycle controls
+- Runway Editorial public reading experience at `/blog` and `/blog/:slug`, with first-response semantic Pages rendering, four layout presets, automatic related reading and product connections, published-only sitemap rows, RSS, `llms.txt`, and `llms-full.txt`
 - Multi-product cart (`/cart`): add products from the catalog or product pages, buy the complete suite in one click, and check out each product with its own secure Lemon Squeezy payment
 - Lemon Squeezy payments as the merchant of record: hosted checkout with signed order webhooks, refund revocation, and per-product variant IDs set in the admin panel; every cart pays once, with multi-product carts bundled into a single custom-priced suite bundle (Lemon Squeezy handles global sales tax, including India GST, and remittance)
 - Full SEO for present and future products: per-page metadata, canonical URLs, Open Graph and Twitter cards, JSON-LD structured data (Organization, WebSite, Product, FAQPage, BreadcrumbList), static and dynamic sitemaps, robots.txt, llms.txt, and noindex on private routes
@@ -43,7 +45,7 @@ Browser
        -> protected Google Sheets delivery secret
 ```
 
-The browser contains only public configuration. The Lemon Squeezy API key and webhook secret, Brevo key, the Google Sheets `/copy` URL, rate-limit salt, and feedback signing secret stay in Cloudflare Worker secrets.
+The browser contains only public configuration. Lemon Squeezy and Brevo keys, the Supabase service-role key, rate-limit salt, feedback signing secret, and TOTP encryption key stay in Cloudflare Worker secrets. Product delivery URLs are stored in D1 and are returned only after authenticated purchase ownership checks.
 
 ## Local storefront
 
@@ -67,7 +69,7 @@ The public values in `.env.example` are placeholders. Set:
 - `VITE_OWNER_EMAIL`
 - Optional public Trustpilot values
 
-Do not add delivery or provider secrets to a `VITE_` variable. Vite compiles every `VITE_` value into browser assets.
+Do not add delivery or provider secrets to a `VITE_` variable. Vite compiles every `VITE_` value into browser assets. Cloudflare Pages builds (`CF_PAGES=1`) and `scripts/deploy.sh` run strict build-time validation for required public values, HTTPS endpoints, placeholders, and secret-shaped variable names; ordinary local development remains zero-config.
 
 ## Cloudflare Worker and D1
 
@@ -75,8 +77,7 @@ Worker files:
 
 - `worker/src/index.js`
 - `worker/wrangler.toml`
-- `worker/migrations/0001_initial.sql`
-- `worker/migrations/0002_products.sql`
+- `worker/migrations/*.sql` (ordered D1 schema and privacy migrations)
 - `worker/.dev.vars.example`
 
 ### 1. Create D1
@@ -103,7 +104,7 @@ Production database:
 npx wrangler d1 migrations apply cashflow-os-platform --remote --config worker/wrangler.toml
 ```
 
-The first migration creates purchases (UNIQUE on Lemon Squeezy order identifier plus product key, so one order can grant one entitlement per product), durable refund revocations, delivery and review queues, testimonials, private feedback, settings, webhook idempotency, daily aggregate metrics, and rate-limit records. The second migration adds the products table with the Lemon Squeezy variant ID. The third migration adds the product media columns. The fourth migration adds the product_features table for per-feature headings, subheadings, and ordering. The fifth migration adds the storefront content column. All migrations are safe to re-run.
+The ordered migrations create the purchase, product, media, content, bundle, consent, security, telemetry, waitlist, marketing, checkout-correlation, privacy, complimentary-access, and first-party Blog publishing structures used by the current Worker. Apply them with Wrangler rather than executing individual files manually; Wrangler records each applied migration and runs only pending files.
 
 Checkout works through the cart: `POST /checkout/session` accepts one or more `productKey`s and creates a single Lemon Squeezy checkout. A single product uses its own variant; a multi-product cart becomes one custom-priced suite bundle whose total is the sum of the D1 sale prices (never client input). The payment webhook creates one purchase row, one delivery email, and one review request per product key in the order, splitting the order total across the keys. Refunding the order revokes every entitlement in it.
 
@@ -131,6 +132,32 @@ When a feature screenshot is uploaded, the Worker can analyze the image and writ
 With neither configured, uploads still succeed: `aiAvailable` comes back `false` and the owner writes the heading and subheading in the admin panel. AI results are always editable before publishing, so the model never has the final word.
 
 The owner dashboard surfaces the live state in two places: the **Integrations** panel reports "AI image scanning" as connected or setup, and the product editor's feature showcase shows a matching inline note with instructions for whichever state is active.
+
+### 2.7 Runway Systems Blog publishing
+
+Migration `0016_blog_publishing.sql` creates Blog categories, posts, tags, media usage, immutable revisions, slug redirects, and the publication outbox. Migration `0017_blog_newsletter.sql` adds expiring, hash-only confirmation records for the first-party Blog email double-opt-in flow. The existing private `MEDIA` bucket stores byte-verified PNG, JPEG, or WebP article images under immutable `blog-media/` keys.
+
+In **Owner dashboard → Blog**:
+
+1. Verify the five-minute owner security challenge.
+2. Start an article, paste writing into the visual or Markdown editor, or import a supported `.md`, `.txt`, or `.html` file. Imports always create private drafts; HTML scripts, styles, embeds, forms, and remote image trackers are not published.
+3. Add cover or inline images through the reusable media library with alt text. Used media cannot be deleted.
+4. Use **Page preview**, then save, schedule, or publish. Published URL changes must use **Change public URL**, which retains a permanent redirect.
+5. Use revision restore, archive, recoverable trash, or permanent deletion as needed. Trashed posts and media are retained for 30 days before scheduled cleanup.
+
+Pages must receive `VITE_API_BASE_URL` (or the optional runtime alias `JOURNAL_SOURCE_URL`) so article first-response rendering, `/blog/feed.xml`, `/llms.txt`, and `/llms-full.txt` can read the Worker. The Worker remains authoritative and returns published projections only.
+
+The original site footer design remains unchanged, with Blog, Newsletter, and
+quiet RSS links inside its existing navigation columns. The double-opt-in
+newsletter section sits above the original signature and navigation on the
+homepage, product pages, Blog index, and published articles; RSS also remains
+available through discovery metadata. Signup posts to
+`/newsletter/subscribe`, sends a Brevo confirmation link containing a fragment
+token, and requires a one-time `POST /newsletter/confirm` before the existing
+audience contact becomes marketing-eligible. Confirmation links expire after
+48 hours; raw tokens are never stored, GET never confirms, previous
+suppressions clear only after a new confirmation, and purchases, sign-in,
+waitlists, feedback, or complimentary access never imply subscription.
 
 ### 3. Configure non-secret Worker values
 
@@ -160,15 +187,14 @@ For production, set each secret with Wrangler:
 npx wrangler secret put LEMONSQUEEZY_API_KEY --config worker/wrangler.toml
 npx wrangler secret put LEMONSQUEEZY_WEBHOOK_SECRET --config worker/wrangler.toml
 npx wrangler secret put SUPABASE_ANON_KEY --config worker/wrangler.toml
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --config worker/wrangler.toml
 npx wrangler secret put BREVO_API_KEY --config worker/wrangler.toml
-npx wrangler secret put GOOGLE_SHEETS_COPY_URL --config worker/wrangler.toml
 npx wrangler secret put RATE_LIMIT_SALT --config worker/wrangler.toml
 npx wrangler secret put FEEDBACK_SIGNING_SECRET --config worker/wrangler.toml
+npx wrangler secret put TOTP_ENCRYPTION_KEY --config worker/wrangler.toml
 ```
 
-Generate distinct random values for `RATE_LIMIT_SALT` and `FEEDBACK_SIGNING_SECRET`, with at least 32 random bytes each. Do not reuse a provider key.
-
-The Sheets secret must be the private Google Sheets `/copy` URL. It is returned only after a valid Supabase bearer token and verified purchase ownership check. It is never shown on the success page.
+Generate distinct random values for `RATE_LIMIT_SALT`, `FEEDBACK_SIGNING_SECRET`, and `TOTP_ENCRYPTION_KEY`, with at least 32 random bytes each. The TOTP key also encrypts pending complimentary claim tokens for retryable delivery; rotating it requires TOTP re-enrollment and resending pending invitations. Do not reuse a provider key. `SUPABASE_SERVICE_ROLE_KEY` is required by the webhook ownership re-check and must never be exposed through a `VITE_` variable.
 
 ### 5. Run and deploy the Worker
 
@@ -229,6 +255,31 @@ Before launch, use Lemon Squeezy test mode to prove:
 - Full refund revokes the account entitlement and cancels any unsent review request
 - Brevo delivery retry after a temporary failure without duplicate messages
 
+## Complimentary customer access
+
+The owner dashboard includes **Complimentary access** for granting one or more
+delivery-configured products without Lemon Squeezy checkout. Its selector is
+derived from the live catalog: future products appear automatically when their
+status becomes **Active**, while coming-soon and hidden products are excluded.
+The Worker independently enforces that active-only boundary. The recipient is
+recorded as a complimentary customer but contributes no paid sale, revenue,
+conversion, order count, or marketing consent.
+
+The transactional email contains an opaque `/claim#token=…` invitation rather
+than a Google Sheets URL. The Worker stores only its hash plus an AES-GCM
+encrypted copy needed by the retryable email queue. A claim requires a verified
+Supabase session whose normalized email exactly matches the invitation. It is
+atomic and idempotent: successful claiming erases the token immediately and
+places zero-cost, source-labelled entitlements in the normal protected account
+library. Unused links expire after seven days; owner resends rotate the token.
+Complimentary access can be cancelled before claim or explicitly revoked after
+claim without touching a paid entitlement.
+
+Complimentary customers can submit verified feedback immediately. They do not
+enter the automatic paid-buyer review sequence; the owner can queue a separate,
+audited neutral invitation that identifies the access as complimentary.
+Granting access never opts a recipient into marketing.
+
 ## Brevo setup
 
 1. Add the production sending domain in Brevo and verify it (DNS records).
@@ -256,7 +307,8 @@ https://YOUR_PROJECT.supabase.co/auth/v1/callback
 ```
 
 4. Set the Supabase Site URL to the production storefront origin.
-5. Add exact redirect allowlist entries for production and controlled staging origins.
+5. Add exact redirect allowlist entries for `/account` and `/claim` on the
+   production origin and any controlled staging origin.
 6. Put only the project URL and public anon key in the storefront environment.
 7. Configure the same project URL in the Worker and add the anon key as a Worker secret.
 8. Set the final owner email in both browser and Worker configuration, or assign `app_metadata.role = owner` through a trusted server-side process.
@@ -267,7 +319,7 @@ Owner authorization is repeated by the Worker for every `/admin` endpoint. Brows
 
 The pricing area uses a star-rating TrustBox, not a review carousel. Replace the placeholder Business Unit ID and public review URL when the final Trustpilot profile exists.
 
-Every verified buyer must continue to receive the same neutral invitation, regardless of rating or private feedback. Do not add positive-rating gates, selective invitation logic, or incentives.
+Every paid verified buyer must continue to receive the same neutral invitation, regardless of rating or private feedback. Do not add positive-rating gates or incentives. Complimentary recipients are not placed in that automatic sequence; if the owner manually sends their separate neutral invitation, its copy identifies the access as complimentary and no benefit depends on responding.
 
 ## SPA hosting, static files, and sitemaps
 
@@ -276,6 +328,7 @@ For Cloudflare Pages, deploy the Vite output directory `dist` and confirm direct
 - `/account`
 - `/success`
 - `/feedback`
+- `/claim` (private, one-time complimentary invitations; excluded from robots and sitemap)
 - `/admin`
 - `/terms`
 - `/products/cashflow-os`
@@ -285,9 +338,9 @@ For Cloudflare Pages, deploy the Vite output directory `dist` and confirm direct
 
 `public/_redirects` uses route-specific rewrites to `/app-shell`, a copy of `index.html` emitted during `npm run build`. Do not add a global `/* /index.html 200` rule there: Wrangler rejects it as an index rewrite loop, and on hosts that accept it the rule can capture `/sitemap.xml`, `/robots.txt`, or `/health` unless exceptions come first.
 
-The frontend API client also falls back to the production Worker in non-dev builds if `VITE_API_BASE_URL` is missing, so dashboard product edits keep going to D1 instead of browser-only mock data.
+Production and staging builds fail closed when `VITE_API_BASE_URL` is missing: API operations are disabled rather than falling back to another environment or browser-only mock data. The mock adapter is development-only.
 
-`functions/sitemap.xml.js` serves the Worker-backed dynamic sitemap from the storefront hostname via `SITEMAP_SOURCE_URL`, `VITE_API_BASE_URL`, or the production Worker fallback; if the Worker cannot be reached, it falls through to the generated static sitemap instead of the React 404 page. `functions/robots.txt.js` and `functions/health.js` keep those URLs machine-readable too. `public/_routes.json` limits Pages Function invocation to `/sitemap.xml`, `/robots.txt`, and `/health` so other static assets and app routes stay on the asset path.
+`functions/sitemap.xml.js` serves the Worker-backed dynamic sitemap from the storefront hostname via `SITEMAP_SOURCE_URL` or `VITE_API_BASE_URL`; if no source is configured or the Worker cannot be reached, it falls through to the generated static sitemap instead of the React 404 page. Pages Functions also proxy the Blog RSS and dynamic LLM discovery files. `functions/blog/[slug].js` fetches the published projection and injects semantic article HTML, canonical/social metadata, RSS discovery, and JSON-LD into the first response. It returns a real noindex 404 for private or unknown records and a short-lived 503 rather than serving incorrect homepage metadata when the publishing API is unavailable. `public/_routes.json` limits Function invocation to these machine-readable and Blog article routes; all other assets stay on the static path.
 
 If the chosen host does not use Cloudflare Pages-style `_redirects`, configure the equivalent fallback to the SPA shell while explicitly allowing real assets, `/sitemap.xml`, `/robots.txt`, `/health`, and `/llms.txt` to pass through.
 
@@ -299,11 +352,15 @@ Public or low-risk endpoints:
 - `GET /config/public`
 - `GET /testimonials`
 - `POST /events/page-view`
-- `POST /webhooks/lemonsqueezy`, verified by Lemon Squeezy HMAC signature
+- `POST /waitlist/subscribe` and token-authorized `POST /waitlist/poll-vote`
+- `GET /unsubscribe?token=...` (confirmation only) and token-only `POST /marketing/unsubscribe`
+- `POST /webhooks/lemonsqueezy`, verified by Lemon Squeezy HMAC signature and exact checkout metadata
 
 Authenticated buyer endpoints:
 
 - `POST /checkout/session`
+- `GET /checkout/session/:sessionId`
+- `POST /complimentary/claim` (opaque token plus exact verified email)
 - `GET /account/purchases`
 - `POST /account/purchases/:purchaseId/delivery`
 - `POST /account/purchases/:purchaseId/feedback-link`
@@ -319,14 +376,19 @@ Owner-only endpoints:
 - `GET /admin/settings`
 - `PUT /admin/settings`
 - `GET /admin/integrations/status`
+- `GET /admin/totp/status`, enrollment/verification routes, and `POST /admin/totp/challenge`
+- Complimentary grant list/create/resend/cancel/revoke/manual-review routes
+- Product, bundle, waitlist, campaign, audience, telemetry, and delivery-operation routes documented in the Worker source
+
+Admin GET requests require an owner session. Mutations also require a recent owner session and a signed five-minute `X-Admin-Challenge` created from one authenticator or recovery-code verification. Raw authenticator codes are never cached by the browser.
 
 ## Validation
 
 ```bash
 npm run build
-npm run test:regression
-npm audit --omit=dev
-node --check worker/src/index.js
+npm test
+npm audit --audit-level=high
+npm run check:worker
 ```
 
 The browser regression covers the Ledger Fold identity, intro and reduced motion, screenshots, responsive layout, approved-only testimonials, protected routes, secure delivery architecture, neutral review policy, and the U+2014 character prohibition.
@@ -355,24 +417,26 @@ In a second terminal, pass the same safe local webhook signing value to the Work
 LEMONSQUEEZY_WEBHOOK_SECRET='your-local-test-value' npm run test:worker
 ```
 
-The Worker regression checks the D1 health path, exact-origin CORS, public configuration exposure, JSON enforcement, unauthenticated route rejection, Lemon Squeezy signature verification and event replay idempotency, Cron execution, telemetry persistence, and sanitized error responses. Delete `worker/.dev.vars` after testing. For a complete pre-launch test, also use Lemon Squeezy test mode, a verified Supabase test user, and a Brevo test recipient to exercise checkout, owner enforcement, email delivery, signed feedback, and refund revocation end to end.
+The Worker regression checks D1 migrations and readiness, exact-origin CORS, TOTP enrollment and elevation, bounded JSON, authoritative checkout correlation and webhook amounts, account deletion, CSV neutralization, opaque unsubscribe suppression, token-bound waitlist votes, durable campaign idempotency/retries, telemetry, and sanitized errors. Delete `worker/.dev.vars` after testing. For a complete pre-launch test, also use Lemon Squeezy test mode, a verified Supabase test user, and a Brevo test recipient to exercise checkout, owner enforcement, email delivery, signed feedback, and refund revocation end to end.
 
 ## Operations: CI, monitoring, backups
 
-- **CI**: every push and pull request runs `.github/workflows/ci.yml` -
-  storefront build, the jsdom/browser regressions, and the Worker API
-  regression against a local D1 with a mock Supabase. No setup required.
+- **CI**: activate `docs/workflow-templates/ci.yml` as
+  `.github/workflows/ci.yml` to run the storefront build, jsdom/browser
+  regressions, and Worker API regression against a local D1 with a mock
+  Supabase on every push and pull request.
 - **Error tracking**: storefront crashes and unhandled browser errors are
   reported to `POST /events/client-error` (rate-limited, PII-redacted,
   retained 30 days) and listed in the owner dashboard under **Operations**,
   alongside failed delivery emails with a one-click retry.
-- **Uptime**: `.github/workflows/uptime.yml` probes `/health` and the
-  storefront every 15 minutes once the `WORKER_HEALTH_URL` and
-  `STOREFRONT_URL` repository variables are set; a failed run emails the
-  repository watchers.
-- **Backups**: `.github/workflows/backup.yml` exports D1 nightly to the R2
-  bucket `runway-d1-backups` once `CLOUDFLARE_API_TOKEN` and
-  `CLOUDFLARE_ACCOUNT_ID` repository secrets are set. Manual dump:
+- **Uptime**: activate `docs/workflow-templates/uptime.yml` as
+  `.github/workflows/uptime.yml`, then set the `STOREFRONT_HEALTH_URL` and
+  `PLATFORM_HEALTH_URL` repository variables. It probes the storefront and
+  Worker every 10 minutes; a failed run emails repository watchers.
+- **Backups**: activate `docs/workflow-templates/backup.yml` as
+  `.github/workflows/backup.yml`, then configure the `CLOUDFLARE_BACKUP_BUCKET`
+  repository variable and `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`
+  secrets. It exports D1 nightly to private R2 storage. For a manual dump, use
   `./scripts/backup-d1.sh`. Restore steps and incident playbooks live in
   [RECOVERY.md](RECOVERY.md).
 

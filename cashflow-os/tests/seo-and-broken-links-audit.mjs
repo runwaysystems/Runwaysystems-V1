@@ -26,12 +26,13 @@ async function run() {
     check('sitemap.xml is valid XML with urlset root', sitemapContent.includes('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">') && sitemapContent.includes('</urlset>'))
     check('sitemap.xml includes homepage', sitemapContent.includes('<loc>https://runwaysystems.cloud/</loc>'))
     check('sitemap.xml includes terms & privacy', sitemapContent.includes('<loc>https://runwaysystems.cloud/terms</loc>'))
+    check('sitemap.xml includes the public Blog index', sitemapContent.includes('<loc>https://runwaysystems.cloud/blog</loc>'))
 
     for (const key of Object.keys(CATALOG)) {
       check(`sitemap.xml includes active catalog product /products/${key}`, sitemapContent.includes(`<loc>https://runwaysystems.cloud/products/${key}</loc>`))
     }
 
-    check('sitemap.xml does not expose private account routes', !sitemapContent.includes('/account') && !sitemapContent.includes('/admin') && !sitemapContent.includes('/cart'))
+    check('sitemap.xml does not expose private account routes', !sitemapContent.includes('/account') && !sitemapContent.includes('/admin') && !sitemapContent.includes('/cart') && !sitemapContent.includes('/claim') && !sitemapContent.includes('/newsletter/confirm'))
   }
 
   // 2. Robots.txt Verification
@@ -42,6 +43,8 @@ async function run() {
     check('robots.txt allows indexing of public storefront', robotsContent.includes('Allow: /'))
     check('robots.txt disallows /admin route', robotsContent.includes('Disallow: /admin'))
     check('robots.txt disallows /account route', robotsContent.includes('Disallow: /account'))
+    check('robots.txt disallows /claim route', robotsContent.includes('Disallow: /claim'))
+    check('robots.txt disallows newsletter confirmation', robotsContent.includes('Disallow: /newsletter/confirm'))
     check('robots.txt disallows /cart route', robotsContent.includes('Disallow: /cart'))
     check('robots.txt disallows /success route', robotsContent.includes('Disallow: /success'))
     check('robots.txt specifies official sitemap location', robotsContent.includes('Sitemap: https://runwaysystems.cloud/sitemap.xml'))
@@ -59,7 +62,11 @@ async function run() {
     '/success',
     '/account',
     '/feedback',
+    '/claim',
+    '/newsletter/confirm',
     '/admin',
+    '/blog',
+    '/blog/feed.xml',
     ...Object.keys(CATALOG).map((key) => `/products/${key}`),
   ])
 
@@ -72,6 +79,10 @@ async function run() {
     'src/pages/ProductPage.jsx',
     'src/pages/CartPage.jsx',
     'src/pages/AccountPage.jsx',
+    'src/pages/ComplimentaryClaimPage.jsx',
+    'src/pages/BlogIndexPage.jsx',
+    'src/pages/BlogPostPage.jsx',
+    'src/components/BlogCard.jsx',
     'src/data/catalog.js',
   ]
 

@@ -8,6 +8,7 @@ import {
   Copy,
   Download,
   ExternalLink,
+  Gift,
   Mail,
   Monitor,
   Percent,
@@ -35,6 +36,16 @@ import {
   sendAdminMarketingTestEmail,
   updateAdminAudienceContact,
 } from '../api/platformApi'
+
+const newIdempotencyKey = () => globalThis.crypto?.randomUUID?.() || `campaign-${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+function newsletterSourceLabel(value = '') {
+  if (value === 'newsletter_home') return 'Homepage signup'
+  if (value === 'newsletter_product') return 'Product page signup'
+  if (value === 'newsletter_blog_index') return 'Blog index signup'
+  if (value === 'newsletter_blog_article') return 'Blog article signup'
+  return ''
+}
 
 const TEMPLATES = [
   {
@@ -98,7 +109,7 @@ function formatHtmlPreview(text) {
   }).join('')
 }
 
-export default function AdminMarketingPanel({ products = [], notify }) {
+export default function AdminMarketingPanel({ products = [], notify, authOptions }) {
   const [segment, setSegment] = useState('all')
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -125,12 +136,13 @@ export default function AdminMarketingPanel({ products = [], notify }) {
     discountCode: 'VIP20',
     ctaLabel: 'Claim 20% Founder Discount →',
     ctaUrl: 'https://runwaysystems.cloud?discount=VIP20',
+    idempotencyKey: newIdempotencyKey(),
   })
   const [previewDevice, setPreviewDevice] = useState('desktop') // 'desktop' | 'mobile'
 
   // Modals
   const [addModalOpen, setAddModalOpen] = useState(false)
-  const [addForm, setAddForm] = useState({ email: '', name: '', source: 'manual' })
+  const [addForm, setAddForm] = useState({ email: '', name: '', source: 'manual', consentConfirmed: false })
   const [broadcastModalOpen, setBroadcastModalOpen] = useState(false)
   const [testSending, setTestSending] = useState(false)
   const [broadcastSending, setBroadcastSending] = useState(false)
@@ -138,16 +150,16 @@ export default function AdminMarketingPanel({ products = [], notify }) {
   const loadAudience = useCallback(async () => {
     try {
       setLoading(true)
-      const data = await getAdminAudience({ segment, search: debouncedSearch, product: productFilter, page: 1, limit: 100 })
+      const data = await getAdminAudience({ segment, search: debouncedSearch, product: productFilter, page: 1, limit: 100 }, authOptions)
       setAudienceData(data)
-      const past = await getAdminMarketingCampaigns()
+      const past = await getAdminMarketingCampaigns(authOptions)
       setCampaigns(past || [])
     } catch (err) {
       notify?.(`Failed to load audience: ${err.message}`)
     } finally {
       setLoading(false)
     }
-  }, [segment, debouncedSearch, productFilter, notify])
+  }, [segment, debouncedSearch, productFilter, notify, authOptions])
 
   useEffect(() => {
     loadAudience()
@@ -172,7 +184,7 @@ export default function AdminMarketingPanel({ products = [], notify }) {
   const handleSendTest = async () => {
     try {
       setTestSending(true)
-      const res = await sendAdminMarketingTestEmail(campaignForm)
+      const res = await sendAdminMarketingTestEmail(campaignForm, authOptions)
       notify?.(res.message || 'Test email dispatched to runwaysystems.cloud@gmail.com!')
     } catch (err) {
       notify?.(`Test email failed: ${err.message}`)
@@ -184,9 +196,10 @@ export default function AdminMarketingPanel({ products = [], notify }) {
   const handleBroadcast = async () => {
     try {
       setBroadcastSending(true)
-      const res = await broadcastAdminMarketingCampaign(campaignForm)
+      const res = await broadcastAdminMarketingCampaign(campaignForm, authOptions)
       setBroadcastModalOpen(false)
-      notify?.(res.message || `Campaign successfully sent to ${res.sentCount} recipients via Brevo!`)
+      setCampaignForm((current) => ({ ...current, idempotencyKey: newIdempotencyKey() }))
+      notify?.(res.message || `Campaign queued for ${res.totalQueued || 0} recipients.`)
       loadAudience()
     } catch (err) {
       notify?.(`Broadcast failed: ${err.message}`)
@@ -197,7 +210,7 @@ export default function AdminMarketingPanel({ products = [], notify }) {
 
   const handleExportCsv = async () => {
     try {
-      const csvText = await exportAdminAudienceCsv({ segment })
+      const csvText = await exportAdminAudienceCsv({ segment }, authOptions)
       const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' })
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
@@ -220,9 +233,9 @@ export default function AdminMarketingPanel({ products = [], notify }) {
     }
     try {
       setBusyAction(true)
-      await createAdminAudienceContact(addForm)
+      await createAdminAudienceContact(addForm, authOptions)
       setAddModalOpen(false)
-      setAddForm({ email: '', name: '', source: 'manual' })
+      setAddForm({ email: '', name: '', source: 'manual', consentConfirmed: false })
       notify?.('Contact added successfully to audience.')
       loadAudience()
     } catch (err) {
@@ -234,8 +247,9 @@ export default function AdminMarketingPanel({ products = [], notify }) {
 
   const handleToggleStatus = async (contact) => {
     const nextStatus = contact.status === 'subscribed' ? 'unsubscribed' : 'subscribed'
+    if (nextStatus === 'subscribed' && !window.confirm('Confirm that this person explicitly requested marketing email. This action is recorded for consent auditing.')) return
     try {
-      await updateAdminAudienceContact(contact.id, { status: nextStatus })
+      await updateAdminAudienceContact(contact.id, { status: nextStatus, ...(nextStatus === 'subscribed' ? { consentConfirmed: true } : {}) }, authOptions)
       notify?.(`Contact status changed to ${nextStatus}.`)
       loadAudience()
     } catch (err) {
@@ -246,7 +260,7 @@ export default function AdminMarketingPanel({ products = [], notify }) {
   const handleDeleteContact = async (id, email) => {
     if (!window.confirm(`Are you sure you want to delete ${email} from your audience?`)) return
     try {
-      await deleteAdminAudienceContact(id)
+      await deleteAdminAudienceContact(id, authOptions)
       notify?.(`Contact ${email} removed.`)
       loadAudience()
     } catch (err) {
@@ -295,7 +309,7 @@ export default function AdminMarketingPanel({ products = [], notify }) {
         </div>
       </header>
       <p className="admin-section-hint">
-        Every Google OAuth sign-in lead, verified Lemon Squeezy buyer, and waitlist subscriber is automatically captured and deduplicated here. Broadcast personalized campaigns via Brevo, offer discount codes, and export your audience anytime.
+        Google sign-ins, verified buyers, waitlist contacts, and confirmed Blog subscribers are deduplicated here. Only contacts with explicit marketing consent are eligible for Brevo campaigns; transactional access and complimentary invitations never imply subscription.
       </p>
 
       {/* Top Audience Metric Cards */}
@@ -688,13 +702,17 @@ export default function AdminMarketingPanel({ products = [], notify }) {
                       </div>
                     </td>
                     <td>
-                      {contact.isCustomer ? (
+                      {contact.complimentaryStatus === 'pending' || contact.complimentaryStatus === 'active' ? (
+                        <span className="audience-badge is-complimentary">
+                          <Gift size={11} /> Complimentary {contact.complimentaryStatus}
+                        </span>
+                      ) : contact.isCustomer ? (
                         <span className="audience-badge is-customer">
                           <ShoppingBag size={11} /> Buyer
                         </span>
                       ) : (
                         <span className="audience-badge is-lead">
-                          <Sparkles size={11} /> Google Lead
+                          <Sparkles size={11} /> {contact.marketingOptInSource?.startsWith('newsletter_') ? 'Blog subscriber' : 'Lead'}
                         </span>
                       )}
                     </td>
@@ -732,6 +750,11 @@ export default function AdminMarketingPanel({ products = [], notify }) {
                       <small style={{ color: 'var(--text-muted)' }}>
                         {contact.createdAt ? new Date(contact.createdAt).toLocaleDateString() : '-'}
                       </small>
+                      {newsletterSourceLabel(contact.marketingOptInSource) && (
+                        <small style={{ display: 'block', marginTop: '4px', color: 'var(--text-muted)' }}>
+                          {newsletterSourceLabel(contact.marketingOptInSource)}
+                        </small>
+                      )}
                     </td>
                     <td style={{ textAlign: 'right' }}>
                       <div className="table-row-actions">
@@ -800,7 +823,9 @@ export default function AdminMarketingPanel({ products = [], notify }) {
                       </span>
                     </td>
                     <td>
-                      <strong>{camp.recipientCount} delivered</strong>
+                      <strong>{camp.sentCount ?? camp.recipientCount} / {camp.recipientCount} sent</strong>
+                      {camp.failedCount > 0 && <small style={{ display: 'block', color: 'var(--danger)' }}>{camp.failedCount} failed</small>}
+                      <small style={{ display: 'block', color: 'var(--text-muted)' }}>{camp.status || 'completed'}</small>
                     </td>
                     <td>
                       <small>{camp.sentBy}</small>
@@ -819,15 +844,16 @@ export default function AdminMarketingPanel({ products = [], notify }) {
       {/* Add Contact Modal */}
       {addModalOpen && (
         <div className="admin-modal-backdrop" onClick={() => setAddModalOpen(false)}>
-          <div className="admin-modal-dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="admin-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="add-contact-title" onClick={(e) => e.stopPropagation()}>
             <header className="admin-modal-head">
-              <h3>Add Manual Contact</h3>
-              <button type="button" onClick={() => setAddModalOpen(false)}><X size={18} /></button>
+              <h3 id="add-contact-title">Add Manual Contact</h3>
+              <button type="button" aria-label="Close add contact dialog" onClick={() => setAddModalOpen(false)}><X size={18} /></button>
             </header>
             <form onSubmit={handleAddContact} className="admin-modal-body">
               <div className="form-group">
-                <label>Email Address</label>
+                <label htmlFor="marketing-contact-email">Email Address</label>
                 <input
+                  id="marketing-contact-email"
                   type="email"
                   required
                   value={addForm.email}
@@ -836,8 +862,9 @@ export default function AdminMarketingPanel({ products = [], notify }) {
                 />
               </div>
               <div className="form-group">
-                <label>Full Name (Optional)</label>
+                <label htmlFor="marketing-contact-name">Full Name (Optional)</label>
                 <input
+                  id="marketing-contact-name"
                   type="text"
                   value={addForm.name}
                   onChange={(e) => setAddForm((f) => ({ ...f, name: e.target.value }))}
@@ -845,21 +872,20 @@ export default function AdminMarketingPanel({ products = [], notify }) {
                 />
               </div>
               <div className="form-group">
-                <label>Source</label>
-                <select
-                  value={addForm.source}
-                  onChange={(e) => setAddForm((f) => ({ ...f, source: e.target.value }))}
-                >
-                  <option value="manual">Manual Entry</option>
-                  <option value="google_signin">Google Sign-In</option>
-                  <option value="checkout">Lemon Squeezy Checkout</option>
-                  <option value="waitlist">Coming Soon Waitlist</option>
-                </select>
+                <label className="consent-check">
+                  <input
+                    type="checkbox"
+                    required
+                    checked={addForm.consentConfirmed}
+                    onChange={(event) => setAddForm((form) => ({ ...form, consentConfirmed: event.target.checked }))}
+                  />
+                  <span>I confirm this person explicitly requested Runway Systems marketing email. This consent will be recorded.</span>
+                </label>
               </div>
               <div className="admin-modal-actions">
                 <button type="button" className="button secondary" onClick={() => setAddModalOpen(false)}>Cancel</button>
-                <button type="submit" className="button primary" disabled={busyAction}>
-                  {busyAction ? 'Saving...' : 'Add Contact'}
+                <button type="submit" className="button primary" disabled={busyAction || !addForm.consentConfirmed}>
+                  {busyAction ? 'Saving...' : 'Add opted-in contact'}
                 </button>
               </div>
             </form>
@@ -870,10 +896,10 @@ export default function AdminMarketingPanel({ products = [], notify }) {
       {/* Broadcast Confirmation Modal */}
       {broadcastModalOpen && (
         <div className="admin-modal-backdrop" onClick={() => !broadcastSending && setBroadcastModalOpen(false)}>
-          <div className="admin-modal-dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="admin-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="broadcast-confirm-title" onClick={(e) => e.stopPropagation()}>
             <header className="admin-modal-head">
-              <h3>Confirm Email Broadcast</h3>
-              <button type="button" onClick={() => !broadcastSending && setBroadcastModalOpen(false)}><X size={18} /></button>
+              <h3 id="broadcast-confirm-title">Confirm Email Broadcast</h3>
+              <button type="button" aria-label="Close broadcast confirmation" onClick={() => !broadcastSending && setBroadcastModalOpen(false)}><X size={18} /></button>
             </header>
             <div className="admin-modal-body">
               <div className="broadcast-summary-callout">

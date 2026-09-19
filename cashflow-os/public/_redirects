@@ -27,10 +27,18 @@
 /account/ /app-shell 200
 /feedback /app-shell 200
 /feedback/ /app-shell 200
+/claim /app-shell 200
+/claim/ /app-shell 200
+/newsletter/confirm /app-shell 200
+/newsletter/confirm/ /app-shell 200
 /admin /app-shell 200
 /admin/ /app-shell 200
 /products/:productKey /app-shell 200
 /products/:productKey/ /app-shell 200
+/blog /app-shell 200
+/blog/ /app-shell 200
+/blog/:slug /app-shell 200
+/blog/:slug/ /app-shell 200
 
 # Dynamic sitemap note: Cloudflare Pages _redirects cannot proxy an external
 # Worker with a 200 rewrite. The build writes dist/sitemap.xml, and the

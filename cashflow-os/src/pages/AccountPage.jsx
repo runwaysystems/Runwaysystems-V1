@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, ArrowUpRight, CheckCircle2, Mail, MessageSquareText, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { ArrowLeft, ArrowUpRight, CheckCircle2, Gift, Mail, MessageSquareText, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { deleteAccount, getAccountPurchases, getPurchaseDelivery, getPurchaseFeedbackLink, resendPurchaseDelivery } from '../api/platformApi'
 import { AccountButton } from '../components/AuthUI'
 import { Logo } from '../components/Brand'
-import { SUPPORT_EMAIL } from '../components/StorefrontShell'
 import { sectionIcon } from '../components/ProductSections'
 import { friendlyName } from '../data/catalog'
 import { useAuth } from '../context/AuthContext'
@@ -34,8 +33,8 @@ function formatDate(value) {
   return new Intl.DateTimeFormat('en-US', { dateStyle: 'medium' }).format(new Date(value))
 }
 
-function deliveryStatusLabel(status) {
-  if (status === 'sent') return 'Delivery email sent'
+function deliveryStatusLabel(status, complimentary = false) {
+  if (status === 'sent') return complimentary ? 'Complimentary invitation delivered' : 'Delivery email sent'
   if (status === 'failed') return 'Delivery email could not be sent — try resending below'
   if (status === 'sending') return 'Delivery email is being sent'
   return 'Delivery email is being prepared'
@@ -139,15 +138,15 @@ export default function AccountPage() {
         <section className="account-hero">
           <p className="eyebrow">PROTECTED LIBRARY</p>
           <h1>Your systems, ready when you are.</h1>
-          <p>Access is tied to the Google account used at checkout. Private delivery links are requested securely and are never stored in this website's frontend.</p>
+          <p>Paid purchases and complimentary products are tied to the exact verified Google account that received access. Private delivery links are requested securely and are never stored in this website's frontend.</p>
         </section>
 
         {deleted ? (
           <section className="account-state account-deleted-state">
             <CheckCircle2 />
-            <h2>Your storefront data has been deleted.</h2>
-            <p>Purchases are detached from this account, testimonial text has been withdrawn, and your email address has been removed from our delivery and review records. Aggregate metrics remain anonymous.</p>
-            <p className="account-deleted-note">To also remove your Google sign-in record from our authentication provider, email <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a> from the connected address. Payment records are retained by Lemon Squeezy as required by financial regulations.</p>
+            <h2>Your account data has been deleted.</h2>
+            <p>Paid and complimentary access is detached, testimonial and feedback text is withdrawn, pending email, invitation, and waitlist records are removed, and the connected Supabase sign-in identity is deleted. Aggregate sales and ratings remain anonymous.</p>
+            <p className="account-deleted-note">Lemon Squeezy retains merchant-of-record payment and tax records under its legal obligations; contact Lemon Squeezy separately for provider-side data requests.</p>
             <Link className="button primary" to="/">Return to the storefront</Link>
           </section>
         ) : loading ? (
@@ -164,17 +163,17 @@ export default function AccountPage() {
         ) : purchases.length === 0 ? (
           <section className="account-state account-empty-state">
             {(() => { const EmptyIcon = sectionIcon('spreadsheet'); return <span className="account-state-icon" aria-hidden="true"><EmptyIcon /></span> })()}
-            <h2>No verified purchases yet.</h2>
-            <p>If you just completed checkout, refresh after a few seconds while Lemon Squeezy confirms the payment.</p>
+            <h2>No products in your library yet.</h2>
+            <p>If you just completed checkout, refresh while Lemon Squeezy confirms payment. If you received complimentary access, open its private invitation and sign in with the exact invited email.</p>
             <div className="account-state-actions">
               <button className="button button--dark" type="button" onClick={loadPurchases}><RefreshCw size={15} /> Refresh</button>
               <Link className="button primary" to="/">Browse products</Link>
             </div>
           </section>
         ) : (
-          <section className="purchase-library" aria-label="Verified purchases">
+          <section className="purchase-library" aria-label="Verified product access">
             <div className="library-heading">
-              <div><p className="eyebrow">VERIFIED PURCHASES</p><h2>{purchases.length} {purchases.length === 1 ? 'system' : 'systems'} in your library</h2></div>
+              <div><p className="eyebrow">VERIFIED PRODUCT ACCESS</p><h2>{purchases.length} {purchases.length === 1 ? 'system' : 'systems'} in your library</h2></div>
               <button className="library-refresh" type="button" onClick={loadPurchases} disabled={fetching} aria-label="Refresh purchases"><RefreshCw size={16} /></button>
             </div>
             <div className="purchase-grid">
@@ -182,15 +181,16 @@ export default function AccountPage() {
                 const productName = purchase.product?.name || friendlyName(purchase.productKey)
                 const accent = purchase.product?.accent || 'lime'
                 const ArtIcon = sectionIcon(purchase.product?.icon || 'spreadsheet')
+                const complimentary = purchase.accessSource === 'complimentary'
                 return (
-                  <article className={`purchase-card purchase-card--${accent}`} key={purchase.id}>
+                  <article className={`purchase-card purchase-card--${accent}${complimentary ? ' purchase-card--complimentary' : ''}`} key={purchase.id}>
                     <div className="purchase-art" aria-hidden="true"><ArtIcon /><span>{productName.toUpperCase()}</span><i /></div>
                     <div className="purchase-details">
-                      <div className="purchase-kicker"><CheckCircle2 size={14} /> Payment verified</div>
+                      <div className="purchase-kicker">{complimentary ? <Gift size={14} /> : <CheckCircle2 size={14} />} {complimentary ? 'Complimentary access' : 'Payment verified'}</div>
                       <h3>{productName}</h3>
-                      <p className="purchase-meta">Purchased {formatDate(purchase.createdAt)} · {formatAmount(purchase.amountTotal, purchase.currency)}</p>
-                      <p className="purchase-delivery-status"><Mail size={14} /> {deliveryStatusLabel(purchase.deliveryEmailStatus)}</p>
-                      {purchase.deliveryEmailStatus === 'failed' && (
+                      <p className="purchase-meta">{complimentary ? `Provided by Runway Systems · ${formatDate(purchase.createdAt)}` : `Purchased ${formatDate(purchase.createdAt)} · ${formatAmount(purchase.amountTotal, purchase.currency)}`}</p>
+                      <p className="purchase-delivery-status"><Mail size={14} /> {deliveryStatusLabel(purchase.deliveryEmailStatus, complimentary)}</p>
+                      {!complimentary && purchase.deliveryEmailStatus === 'failed' && (
                         <p className="purchase-resend-row">
                           <button className="button text" type="button" onClick={() => resendDelivery(purchase.id)} disabled={Boolean(workingId)}>
                             <RefreshCw size={14} /> {workingId === `resend:${purchase.id}` ? 'Requeuing…' : 'Resend delivery email'}
@@ -219,7 +219,7 @@ export default function AccountPage() {
             <div className="account-danger-zone__copy">
               <p className="eyebrow">DATA & PRIVACY</p>
               <h2>Delete your storefront data</h2>
-              <p>Removes your email and name from purchases and review records, withdraws testimonials, and detaches your library access. This cannot be undone.</p>
+              <p>Removes your email and name from paid and complimentary access records, invalidates pending invitations, withdraws testimonials, and detaches your library. This cannot be undone.</p>
             </div>
             <div className="account-danger-zone__actions">
               {deleteConfirm ? (

@@ -4,8 +4,6 @@
 // the Pages hostname. This function keeps the URL machine-readable and, when a
 // Worker URL is configured, reports the real platform readiness result.
 
-const DEFAULT_API_BASE_URL = 'https://cashflow-os-platform.runwaysystems-cloud.workers.dev'
-
 function stripTrailingSlash(value) {
   return String(value || '').trim().replace(/\/+$/, '')
 }
@@ -13,7 +11,8 @@ function stripTrailingSlash(value) {
 function platformUrl(env, requestUrl, path) {
   const explicit = stripTrailingSlash(env.HEALTH_SOURCE_URL)
   const apiBase = stripTrailingSlash(env.VITE_API_BASE_URL)
-  const raw = explicit || (apiBase ? `${apiBase}${path}` : `${DEFAULT_API_BASE_URL}${path}`)
+  const raw = explicit || (apiBase ? `${apiBase}${path}` : '')
+  if (!raw) return null
 
   let source
   try {
@@ -42,11 +41,11 @@ function jsonResponse(body, status = 200) {
 export async function onRequestGet(context) {
   const source = platformUrl(context.env || {}, context.request.url, '/health')
   if (!source) {
-    return jsonResponse({ ok: true, service: 'runway-systems-storefront', platform: 'not-configured' })
+    return jsonResponse({ ok: false, ready: false, service: 'runway-systems-storefront', platform: 'not-configured' }, 503)
   }
 
   try {
-    const upstream = await fetch(source, { headers: { Accept: 'application/json' } })
+    const upstream = await fetch(source, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(5000) })
     const text = await upstream.text()
     let payload
     try {
@@ -60,9 +59,7 @@ export async function onRequestGet(context) {
     return jsonResponse({
       ok: false,
       service: 'runway-systems-storefront',
-      platformUrl: source.origin,
       message: 'Platform health check could not be reached.',
-      error: error?.message || 'fetch failed',
     }, 503)
   }
 }
