@@ -19,6 +19,8 @@ function robotsText(origin) {
     'Allow: /',
     'Disallow: /account',
     'Disallow: /feedback',
+    'Disallow: /claim',
+    'Disallow: /newsletter/confirm',
     'Disallow: /admin',
     'Disallow: /success',
     'Disallow: /cart',

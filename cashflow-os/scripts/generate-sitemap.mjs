@@ -37,6 +37,7 @@ if (excluded.size) console.warn(`[seo] excluding hidden products from sitemap: $
 const urls = [
   { loc: `${SITE_URL}/`, changefreq: 'weekly', priority: '1.0' },
   { loc: `${SITE_URL}/terms`, changefreq: 'monthly', priority: '0.4' },
+  { loc: `${SITE_URL}/blog`, changefreq: 'weekly', priority: '0.8' },
   ...Object.keys(CATALOG).filter((key) => !excluded.has(key)).map((key) => ({
     loc: `${SITE_URL}/products/${key}`,
     lastmod: today,
@@ -58,6 +59,8 @@ const robots = [
   'Allow: /',
   'Disallow: /account',
   'Disallow: /feedback',
+  'Disallow: /claim',
+  'Disallow: /newsletter/confirm',
   'Disallow: /admin',
   'Disallow: /success',
   'Disallow: /cart',

@@ -25,7 +25,7 @@ export default function NotFound({ theme, onToggleTheme, palette, onPaletteChang
           <Link className="button primary" to="/"><ArrowLeft size={15} /> Back to Runway Systems</Link>
         </div>
       </main>
-      <Footer products={[]} />
+      <Footer products={[]} newsletter={false} />
     </div>
   )
 }

@@ -1,7 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react'
 import { Link, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
 import { ArrowUpRight, Check, Mail, RefreshCw, ShieldCheck } from 'lucide-react'
-import { trackPageView, verifyCheckoutSession, getAccountPurchases } from './api/platformApi'
+import { trackPageView, verifyCheckoutSession } from './api/platformApi'
 import { isPreviewRequest } from './hooks/usePreviewDraft'
 import { AuthModal } from './components/AuthUI'
 import { Logo } from './components/Brand'
@@ -15,16 +15,20 @@ import { useAuth } from './context/AuthContext'
 import { usePublicProducts } from './hooks/usePublicProducts'
 import { useSecureCheckout } from './hooks/useSecureCheckout'
 import CatalogHome from './pages/CatalogHome'
-import ProductPage from './pages/ProductPage'
 import OwnerRoute from './components/OwnerRoute'
 import { buildPoliciesViewModel } from './data/policies'
 
 import NotFound from './pages/NotFound'
 
+const ProductPage = lazy(() => import('./pages/ProductPage'))
 const AccountPage = lazy(() => import('./pages/AccountPage'))
 const AdminDashboard = lazy(() => import('./pages/AdminDashboard'))
 const CartPage = lazy(() => import('./pages/CartPage'))
 const FeedbackPage = lazy(() => import('./pages/FeedbackPage'))
+const ComplimentaryClaimPage = lazy(() => import('./pages/ComplimentaryClaimPage'))
+const BlogIndexPage = lazy(() => import('./pages/BlogIndexPage'))
+const BlogPostPage = lazy(() => import('./pages/BlogPostPage'))
+const NewsletterConfirmPage = lazy(() => import('./pages/NewsletterConfirmPage'))
 
 function RouteLoadingSkeleton() {
   return (
@@ -92,10 +96,21 @@ function LegalPage({ theme, onToggleTheme, palette, onPaletteChange }) {
   )
 }
 
+function readPendingCheckout() {
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem('runway.pending-checkout.v1') || 'null')
+    if (!value?.sessionId || Date.now() - Number(value.createdAt || 0) > 30 * 60 * 1000) return null
+    return value
+  } catch {
+    return null
+  }
+}
+
 function SuccessPage({ theme, onToggleTheme }) {
   const [searchParams] = useSearchParams()
   const { session, profile, loading, openAuth } = useAuth()
-  const checkoutSessionId = searchParams.get('session_id') || ''
+  const [pendingCheckout] = useState(readPendingCheckout)
+  const checkoutSessionId = searchParams.get('session_id') || pendingCheckout?.sessionId || ''
   const productKey = searchParams.get('product') || ''
   const config = usePublicProducts()
   const supportEmail = config?.supportEmail || SUPPORT_EMAIL
@@ -107,60 +122,59 @@ function SuccessPage({ theme, onToggleTheme }) {
 
   useEffect(() => {
     let active = true
+    let timer = null
     if (loading) return undefined
     if (!checkoutSessionId) {
-      // Lemon Squeezy redirects without a session reference, so confirm the
-      // order by polling the account library until the paid webhook lands.
-      if (!session?.access_token) {
-        setStatus('signin')
-        return undefined
-      }
-      setStatus('verifying')
-      setError('')
-      const startedAt = Date.now() - 15 * 60 * 1000
-      let attempts = 0
-      const poll = async () => {
-        if (!active) return
-        attempts += 1
-        try {
-          const all = await getAccountPurchases({ token: session.access_token })
-          const recent = (all || []).filter((purchase) => new Date(purchase.createdAt).getTime() >= startedAt)
-          if (recent.length) {
-            setPurchases(recent)
-            setStatus('verified')
-            return
-          }
-        } catch { /* keep polling */ }
-        if (attempts < 10) window.setTimeout(poll, 3000)
-        else {
-          setError('Your payment is being processed. It usually appears within a minute. Refresh or check your account library.')
-          setStatus('error')
-        }
-      }
-      poll()
-      return () => { active = false }
+      setError('This page has no checkout reference, so it cannot verify a payment. Open your account library or contact support with your receipt.')
+      setStatus('error')
+      return undefined
     }
     if (!session?.access_token) {
       setStatus('signin')
       return undefined
     }
+    if (pendingCheckout?.userId && pendingCheckout.userId !== session.user?.id) {
+      setError('Sign in with the same account that started this checkout.')
+      setStatus('error')
+      return undefined
+    }
 
     setStatus('verifying')
     setError('')
-    verifyCheckoutSession(checkoutSessionId, { token: session.access_token })
-      .then((result) => {
+    let attempts = 0
+    const poll = async () => {
+      attempts += 1
+      try {
+        const result = await verifyCheckoutSession(checkoutSessionId, { token: session.access_token })
         if (!active) return
-        const verified = Array.isArray(result?.purchases) ? result.purchases : (result?.id ? [result] : [])
-        setPurchases(verified)
-        setStatus('verified')
-      })
-      .catch((verificationError) => {
+        const verified = Array.isArray(result?.purchases) ? result.purchases : []
+        if (verified.length > 0) {
+          setPurchases(verified)
+          setStatus('verified')
+          window.sessionStorage.removeItem('runway.pending-checkout.v1')
+          return
+        }
+        if (result?.pending && attempts < 20) {
+          timer = window.setTimeout(poll, 3000)
+          return
+        }
+        throw new Error('Payment confirmation has not arrived yet.')
+      } catch (verificationError) {
         if (!active) return
+        if (attempts < 20 && /not arrived|temporarily|fetch|network|could not be reached/i.test(verificationError.message || '')) {
+          timer = window.setTimeout(poll, 3000)
+          return
+        }
         setError(verificationError.message || 'Payment could not be verified yet.')
         setStatus('error')
-      })
-    return () => { active = false }
-  }, [checkoutSessionId, loading, session?.access_token])
+      }
+    }
+    poll()
+    return () => {
+      active = false
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [checkoutSessionId, loading, pendingCheckout?.userId, session?.access_token, session?.user?.id])
 
   const names = purchases.map((purchase) => purchase?.product?.name || 'your product').filter(Boolean)
   const resolvedNames = names.length
@@ -283,6 +297,10 @@ function App() {
           <Route path="/success" element={<SuccessPage theme={theme} onToggleTheme={toggleTheme} />} />
           <Route path="/account" element={<AccountPage />} />
           <Route path="/feedback" element={<FeedbackPage />} />
+          <Route path="/blog" element={<BlogIndexPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
+          <Route path="/blog/:slug" element={<BlogPostPage theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
+          <Route path="/newsletter/confirm" element={<NewsletterConfirmPage />} />
+          <Route path="/claim" element={<ComplimentaryClaimPage />} />
           <Route path="/admin" element={<OwnerRoute><AdminDashboard /></OwnerRoute>} />
           <Route path="*" element={<NotFound theme={theme} onToggleTheme={toggleTheme} palette={palette} onPaletteChange={changePalette} />} />
         </Routes>

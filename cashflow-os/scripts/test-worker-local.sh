@@ -21,7 +21,7 @@ WORKER_CONFIG="worker/wrangler.toml"
 D1_NAME="${D1_NAME:-cashflow-os-platform}"
 
 [ -f worker/.dev.vars ] || fail "worker/.dev.vars is missing (see README: copy safe local test values into it)"
-WEBHOOK_SECRET="$(grep '^LEMONSQUEEZY_WEBHOOK_SECRET=' worker/.dev.vars | cut -d= -f2-)"
+WEBHOOK_SECRET="$(grep '^LEMONSQUEEZY_WEBHOOK_SECRET=' worker/.dev.vars | cut -d= -f2- | sed -e 's/^["'\'']//;s/["'\'']$//')"
 [ -n "$WEBHOOK_SECRET" ] || fail "LEMONSQUEEZY_WEBHOOK_SECRET is not set in worker/.dev.vars"
 
 # wrangler applies local D1 migrations in batches, not in one pass, so call
@@ -32,27 +32,45 @@ for _ in 1 2 3; do
 done
 say "verifying the newest migration table exists"
 npx --no-install wrangler d1 execute "$D1_NAME" --local --config "$WORKER_CONFIG" \
-  --command "SELECT id FROM client_errors LIMIT 1" >/dev/null \
+  --command "SELECT id FROM complimentary_grants LIMIT 1; SELECT grant_id FROM complimentary_grant_items LIMIT 1; SELECT access_source FROM purchases LIMIT 1; SELECT token_hash FROM newsletter_confirmations LIMIT 1" >/dev/null \
   || fail "local migrations did not fully apply - run the apply command manually and check for SQL errors"
 
 # A fresh run must start from clean buckets and queues; rapid re-runs
 # otherwise trip the checkout rate limits by design.
 say "clearing runtime tables for a repeatable run"
 npx --no-install wrangler d1 execute "$D1_NAME" --local --config "$WORKER_CONFIG" --command "
-  DELETE FROM rate_limits; DELETE FROM purchases; DELETE FROM processed_webhooks;
+  DELETE FROM rate_limits; DELETE FROM complimentary_grant_items; DELETE FROM complimentary_grants;
+  DELETE FROM purchases; DELETE FROM processed_webhooks;
   DELETE FROM review_requests; DELETE FROM revoked_orders; DELETE FROM daily_metrics;
   DELETE FROM client_errors; DELETE FROM admin_audit_log; DELETE FROM checkout_consents;
-  DELETE FROM feedback; DELETE FROM brevo_quota; DELETE FROM bundles; DELETE FROM testimonials;" >/dev/null
+  DELETE FROM feedback; DELETE FROM brevo_quota; DELETE FROM bundles; DELETE FROM testimonials;
+  DELETE FROM marketing_deliveries; DELETE FROM marketing_campaigns; DELETE FROM marketing_suppressions;
+  DELETE FROM marketing_unsubscribe_tokens; DELETE FROM newsletter_confirmations; DELETE FROM waitlist_action_tokens; DELETE FROM product_waitlist;
+  DELETE FROM blog_post_media; DELETE FROM blog_post_tags; DELETE FROM blog_post_revisions;
+  DELETE FROM blog_slug_redirects; DELETE FROM blog_publication_outbox; DELETE FROM blog_posts;
+  DELETE FROM blog_tags; DELETE FROM blog_media;
+  DELETE FROM audience_contacts; DELETE FROM admin_totp;" >/dev/null
 
+LOG_DIR="$(mktemp -d)"
 say "starting the mock Supabase fixture on :9876"
-node tests/mock-supabase.mjs >/dev/null 2>&1 &
+setsid node tests/mock-supabase.mjs >"$LOG_DIR/mock.log" 2>&1 &
 MOCK_PID=$!
 
 say "starting wrangler dev on :8787"
-CI=true npx --no-install wrangler dev --local --config "$WORKER_CONFIG" --port 8787 --ip 127.0.0.1 >/dev/null 2>&1 &
+setsid env CI=true npx --no-install wrangler dev --local --config "$WORKER_CONFIG" --port 8787 --ip 127.0.0.1 >"$LOG_DIR/worker.log" 2>&1 &
 DEV_PID=$!
 
-cleanup() { kill "$MOCK_PID" "$DEV_PID" 2>/dev/null || true; }
+cleanup() {
+  status=$?
+  kill -- -"$MOCK_PID" -"$DEV_PID" 2>/dev/null || true
+  wait "$MOCK_PID" "$DEV_PID" 2>/dev/null || true
+  if [ "$status" -ne 0 ]; then
+    say "Worker log tail after failure"
+    tail -n 80 "$LOG_DIR/worker.log" >&2 || true
+  fi
+  rm -rf "$LOG_DIR"
+  return "$status"
+}
 trap cleanup EXIT
 
 say "waiting for the Worker to report readiness"

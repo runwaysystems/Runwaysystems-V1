@@ -27,14 +27,11 @@ const draftFromBundle = (bundle) => ({
   sortOrder: Number(bundle.sortOrder) || 0,
 })
 
-// Mirrors the Worker's pricing exactly so the owner sees the real number
-// before saving. The Worker recomputes it at checkout regardless.
-const toCents = (value) => {
-  const match = String(value || '').replace(/,/g, '').match(/^[^\d]*(\d+)(?:\.(\d{1,2}))?/)
-  if (!match) return null
-  return Number(match[1]) * 100 + Number((match[2] || '').padEnd(2, '0') || 0)
-}
-const display = (cents) => `$${(cents / 100).toFixed(2).replace(/\.00$/, '')}`
+// Mirrors the Worker's pricing exactly using authoritative integer money
+// fields. Display strings are never parsed to decide a checkout amount.
+const display = (cents, currency = 'USD') => new Intl.NumberFormat('en-US', {
+  style: 'currency', currency, maximumFractionDigits: cents % 100 ? 2 : 0,
+}).format(cents / 100)
 
 function slugify(value) {
   return String(value).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
@@ -63,13 +60,16 @@ export default function AdminBundlesPanel({ bundles, products, onSave, onDelete,
       .filter(Boolean)
     if (members.length < 2) return null
     let full = 0
+    const currencies = new Set()
     for (const member of members) {
-      const cents = toCents(member.salePrice)
-      if (cents === null) return { unpriced: member.name }
+      const cents = Number(member.priceCents)
+      if (!Number.isInteger(cents) || cents <= 0) return { unpriced: member.name }
+      currencies.add(member.currency || 'USD')
       full += cents
     }
+    if (currencies.size !== 1) return { unpriced: 'Products with different currencies' }
     const bundleCents = Math.round(full * (100 - draft.discountPercent) / 100)
-    return { full, bundleCents, saving: full - bundleCents }
+    return { full, bundleCents, saving: full - bundleCents, currency: [...currencies][0] }
   }, [draft, sellableProducts])
 
   const submit = (event) => {
@@ -164,9 +164,9 @@ export default function AdminBundlesPanel({ bundles, products, onSave, onDelete,
             )}
             {pricing && !pricing.unpriced && (
               <div className="bundle-price-preview">
-                <div><span>Sum of products</span><s>{display(pricing.full)}</s></div>
-                <div><span>Bundle price</span><strong>{display(pricing.bundleCents)}</strong></div>
-                <div><span>Customer saves</span><b>{display(pricing.saving)} ({draft.discountPercent}%)</b></div>
+                <div><span>Sum of products</span><s>{display(pricing.full, pricing.currency)}</s></div>
+                <div><span>Bundle price</span><strong>{display(pricing.bundleCents, pricing.currency)}</strong></div>
+                <div><span>Customer saves</span><b>{display(pricing.saving, pricing.currency)} ({draft.discountPercent}%)</b></div>
               </div>
             )}
             {draft.productKeys.length < 2 && <p className="bundle-price-preview is-warning">Select at least two products to see the bundle price.</p>}

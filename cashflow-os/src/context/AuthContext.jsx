@@ -88,12 +88,12 @@ export function AuthProvider({ children }) {
     }
 
     setAuthPending(true)
-    // Use a fixed, origin-only redirect target. Never echo the full
-    // window.location.href: a victim who lands on
-    // /anything?next=https://evil.com should not have the OAuth callback
-    // honour that query, and Supabase's own allowlist is the
-    // primary defence, not an excuse to forward user input.
-    const safeRedirect = `${window.location.origin}/account`
+    // Use one of two fixed same-origin redirect targets. Never echo the full
+    // window.location.href or user input. The claim route is selected only
+    // when this tab holds an opaque invitation in sessionStorage; otherwise
+    // authentication returns to the account library.
+    const hasPendingComplimentaryClaim = Boolean(window.sessionStorage.getItem('runway.pending-complimentary-claim.v1'))
+    const safeRedirect = `${window.location.origin}${hasPendingComplimentaryClaim ? '/claim' : '/account'}`
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {

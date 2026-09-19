@@ -1,0 +1,92 @@
+/* Complimentary access: owner grant console and recipient claim route. */
+.complimentary-panel { scroll-margin-top: 95px; }
+.complimentary-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 18px 0; }
+.complimentary-stats > div { display: grid; grid-template-columns: 32px 1fr; min-height: 78px; align-items: center; column-gap: 10px; padding: 13px; border: 1px solid rgba(255,255,255,.08); border-radius: 12px; background: rgba(255,255,255,.025); }
+.complimentary-stats svg { grid-row: span 2; width: 18px; color: var(--accent); }
+.complimentary-stats strong { font-size: 22px; }
+.complimentary-stats span { color: #7f8796; font-size: 10px; }
+.complimentary-form { display: grid; grid-template-columns: minmax(240px,.7fr) minmax(360px,1.3fr); gap: 18px; padding: 17px; border: 1px solid rgba(201,162,39,.18); border-radius: 15px; background: rgba(201,162,39,.035); }
+.complimentary-email-field { display: flex; flex-direction: column; gap: 8px; }
+.complimentary-email-field label,
+.complimentary-products legend { color: #c7cbd3; font-size: 11px; font-weight: 700; }
+.complimentary-email-field input { min-height: 48px; padding: 0 13px; border: 1px solid rgba(255,255,255,.11); border-radius: 9px; outline: 0; color: #f4f1e9; background: #11141a; }
+.complimentary-email-field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb,var(--accent) 10%,transparent); }
+.complimentary-email-field small,
+.complimentary-products small { color: #737b89; font-size: 9px; line-height: 1.5; }
+.complimentary-products .complimentary-products-note { display: block; margin-top: 4px; font-size: 10px; }
+.complimentary-products { min-width: 0; margin: 0; padding: 0; border: 0; }
+.complimentary-products > div { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin-top: 9px; }
+.complimentary-products label { display: flex; align-items: flex-start; gap: 9px; padding: 10px; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; cursor: pointer; background: rgba(255,255,255,.025); }
+.complimentary-products label:has(input:checked) { border-color: color-mix(in srgb,var(--accent) 50%,transparent); background: color-mix(in srgb,var(--accent) 7%,transparent); }
+.complimentary-products label.is-disabled { opacity: .48; cursor: not-allowed; }
+.complimentary-products input { margin-top: 2px; accent-color: var(--accent); }
+.complimentary-products span { display: grid; gap: 3px; }
+.complimentary-products b { font-size: 10px; }
+.complimentary-send-row { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 15px; padding-top: 4px; }
+.complimentary-send-row p { display: flex; align-items: center; gap: 6px; margin: 0; color: #7f8796; font-size: 9px; }
+.admin-inline-error { margin-top: 13px; padding: 11px 13px; border: 1px solid rgba(230,115,93,.25); border-radius: 9px; color: #ffb5a6; background: rgba(230,115,93,.07); font-size: 10px; }
+.complimentary-history-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 21px 0 12px; }
+.complimentary-history-head h3 { margin: 0 0 4px; font-size: 16px; }
+.complimentary-history-head p { margin: 0; color: #737b89; font-size: 9px; }
+.admin-loading-inline { display: flex; min-height: 110px; align-items: center; justify-content: center; gap: 8px; color: #7f8796; font-size: 10px; }
+.admin-loading-inline svg { width: 15px; }
+.complimentary-table-wrap { overflow-x: auto; }
+.complimentary-table { width: 100%; border-collapse: collapse; }
+.complimentary-table th { padding: 10px; border-bottom: 1px solid rgba(255,255,255,.1); color: #717987; font-size: 8px; letter-spacing: .08em; text-align: left; text-transform: uppercase; }
+.complimentary-table td { min-width: 115px; padding: 13px 10px; border-bottom: 1px solid rgba(255,255,255,.06); color: #aeb4c0; font-size: 10px; vertical-align: top; }
+.complimentary-table td:first-child { min-width: 205px; }
+.complimentary-table td:last-child { min-width: 200px; }
+.complimentary-table td > strong,
+.complimentary-table td > span { display: block; color: #e7e4dd; }
+.complimentary-table td > small { display: block; max-width: 230px; margin-top: 5px; color: #68717f; line-height: 1.45; }
+.complimentary-product-tags { display: flex; max-width: 250px; flex-wrap: wrap; gap: 5px; }
+.complimentary-product-tags span { padding: 4px 6px; border-radius: 5px; color: #c9b875; background: rgba(201,162,39,.08); font-size: 8px; }
+.complimentary-status,
+.complimentary-email-status { width: max-content; padding: 5px 7px; border-radius: 99px; font-size: 8px; text-transform: capitalize; }
+.complimentary-status.is-claimed,
+.complimentary-email-status.is-sent { color: #9bd7b5; background: rgba(73,171,113,.1); }
+.complimentary-status.is-pending,
+.complimentary-email-status.is-pending,
+.complimentary-email-status.is-sending { color: #e1c978; background: rgba(201,162,39,.1); }
+.complimentary-status.is-revoked,
+.complimentary-status.is-cancelled,
+.complimentary-status.is-expired,
+.complimentary-email-status.is-failed { color: #ffad9d; background: rgba(230,115,93,.1); }
+.complimentary-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.complimentary-actions button { display: inline-flex; align-items: center; gap: 4px; padding: 6px 7px; border: 1px solid rgba(255,255,255,.1); border-radius: 6px; color: #c4cad3; background: rgba(255,255,255,.035); font-size: 8px; }
+.complimentary-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.complimentary-actions button.is-danger { color: #eaa190; }
+.complimentary-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.complimentary-action-complete { display: inline-flex; align-items: center; gap: 4px; color: #737b89; font-size: 8px; }
+
+.complimentary-claim-page { min-height: 100vh; min-height: 100svh; color: #f4f1e9; background: #090b0f; }
+.complimentary-claim-main { position: relative; display: grid; min-height: calc(100vh - 74px); min-height: calc(100svh - 74px); overflow: hidden; padding: 32px 20px; place-items: center; }
+.complimentary-claim-main::before { position: absolute; inset: 0; background: radial-gradient(circle at 50% 35%, color-mix(in srgb,var(--accent) 11%,transparent), transparent 40%), radial-gradient(rgba(255,255,255,.14) .6px, transparent .6px); background-size: auto, 26px 26px; content: ''; opacity: .65; mask-image: radial-gradient(circle,black,transparent 78%); }
+.complimentary-claim-card { position: relative; z-index: 1; display: flex; width: min(100%,650px); min-height: 430px; flex-direction: column; align-items: center; justify-content: center; padding: clamp(28px,6vw,56px); border: 1px solid rgba(255,255,255,.12); border-radius: 25px; text-align: center; background: rgba(14,17,23,.93); box-shadow: 0 40px 100px rgba(0,0,0,.4); }
+.complimentary-claim-icon { display: grid; width: 58px; height: 58px; margin-bottom: 20px; place-items: center; border: 1px solid color-mix(in srgb,var(--accent) 35%,transparent); border-radius: 16px; color: var(--accent); background: color-mix(in srgb,var(--accent) 7%,transparent); }
+.complimentary-claim-card .eyebrow { margin-bottom: 10px; color: var(--accent); }
+.complimentary-claim-card h1 { max-width: 520px; margin: 0 0 16px; font-size: clamp(36px,6vw,55px); line-height: 1; }
+.complimentary-claim-card > p:not(.eyebrow) { max-width: 520px; margin: 0 0 25px; color: #929aa8; font-size: 14px; line-height: 1.65; }
+.complimentary-claim-spinner { width: 25px; color: var(--accent); }
+.complimentary-claim-security { display: flex; max-width: 490px; align-items: flex-start; gap: 9px; margin-top: 19px; padding: 12px; border-radius: 10px; color: #838b99; background: rgba(255,255,255,.025); font-size: 9px; line-height: 1.55; text-align: left; }
+.complimentary-claim-security svg { width: 18px; flex: 0 0 auto; color: var(--accent); }
+.complimentary-claim-success { width: 38px; height: 38px; margin-bottom: 18px; color: #8fd1aa; }
+.complimentary-claimed-products { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; margin: -5px 0 24px; }
+.complimentary-claimed-products span { padding: 7px 9px; border: 1px solid rgba(201,162,39,.2); border-radius: 7px; color: #d7c689; background: rgba(201,162,39,.055); font-size: 10px; }
+.complimentary-claim-card > small { max-width: 500px; margin-top: 20px; color: #69717e; font-size: 9px; line-height: 1.55; }
+.complimentary-claim-card > .button.text { margin-top: 9px; }
+.purchase-card--complimentary .purchase-kicker { color: #d8c578; }
+
+@media (max-width: 860px) {
+  .complimentary-stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .complimentary-form { grid-template-columns: 1fr; }
+  .complimentary-products > div { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .complimentary-stats { grid-template-columns: 1fr; }
+  .complimentary-send-row,
+  .complimentary-history-head { align-items: stretch; flex-direction: column; }
+  .complimentary-send-row .button { justify-content: center; }
+  .complimentary-claim-card { min-height: 400px; padding: 26px 18px; }
+  .complimentary-claim-page .portal-home-link { display: none; }
+}

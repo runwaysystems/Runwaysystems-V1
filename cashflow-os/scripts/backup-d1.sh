@@ -10,7 +10,7 @@
 #   CLOUDFLARE_API_TOKEN   optional; otherwise the existing `wrangler login` session
 #   CLOUDFLARE_ACCOUNT_ID  required when using CLOUDFLARE_API_TOKEN
 #
-# The nightly GitHub Action (.github/workflows/backup.yml) runs this script;
+# The inactive GitHub Actions template lives at docs/workflow-templates/backup.yml;
 # restore instructions live in RECOVERY.md.
 set -euo pipefail
 

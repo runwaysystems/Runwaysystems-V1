@@ -8,6 +8,9 @@ import { CartProvider } from './context/CartContext'
 import { installGlobalErrorHandlers } from './lib/errorReporting'
 import './styles.css'
 import './platform.css'
+import './complimentary.css'
+import './journal.css'
+import './newsletter.css'
 
 // Attach window-level error and unhandledrejection reporters before the
 // very first render so even a boot-time crash is reported to the platform.

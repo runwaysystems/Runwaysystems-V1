@@ -8,6 +8,7 @@ const APP_ORIGIN = process.env.WORKER_APP_ORIGIN || 'https://regression-store.te
 const TEST_IP = process.env.WORKER_TEST_IP || `198.51.100.${(Math.floor(Date.now() / 60000) % 200) + 1}`
 const LS_WEBHOOK_SECRET = process.env.LEMONSQUEEZY_WEBHOOK_SECRET
 const OWNER_TOKEN = process.env.WORKER_OWNER_TOKEN || ''
+const MOCK_PROVIDER_URL = process.env.WORKER_MOCK_PROVIDER_URL || 'http://127.0.0.1:9876'
 
 if (!LS_WEBHOOK_SECRET) {
   console.error('Set LEMONSQUEEZY_WEBHOOK_SECRET to the safe local value configured in worker/.dev.vars.')
@@ -15,6 +16,30 @@ if (!LS_WEBHOOK_SECRET) {
 }
 
 const results = []
+let ADMIN_CHALLENGE = ''
+
+function base32Bytes(secret) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+  let bits = ''
+  for (const char of String(secret || '').replace(/=+$/g, '').toUpperCase()) {
+    const value = alphabet.indexOf(char)
+    if (value < 0) continue
+    bits += value.toString(2).padStart(5, '0')
+  }
+  const bytes = []
+  for (let index = 0; index + 8 <= bits.length; index += 8) bytes.push(parseInt(bits.slice(index, index + 8), 2))
+  return Buffer.from(bytes)
+}
+
+function currentTotp(secret) {
+  const counter = Math.floor(Date.now() / 30000)
+  const message = Buffer.alloc(8)
+  message.writeBigUInt64BE(BigInt(counter))
+  const digest = createHmac('sha1', base32Bytes(secret)).update(message).digest()
+  const offset = digest[digest.length - 1] & 0x0f
+  const value = (digest.readUInt32BE(offset) & 0x7fffffff) % 1000000
+  return String(value).padStart(6, '0')
+}
 
 async function request(path, { method = 'GET', origin = APP_ORIGIN, body, headers = {} } = {}) {
   const finalHeaders = new Headers(headers)
@@ -55,6 +80,21 @@ function signedLemonWebhook(event) {
   })
 }
 
+async function createCheckoutFixture(token, productKeys, bundleKey = '') {
+  const fixtureKey = token.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
+  const response = await request('/checkout/session', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: { productKeys, bundleKey, consent: true, consentSource: 'cart' },
+  })
+  return {
+    response,
+    checkoutId: response.payload?.sessionId || '',
+    userId: token === OWNER_TOKEN ? 'local-owner-user-id' : `local-${fixtureKey}`,
+    email: token === OWNER_TOKEN ? 'owner@your-domain.com' : `${fixtureKey}@suite.test`,
+  }
+}
+
 const health = await request('/health')
 check('health reports full readiness when configuration is complete', health.response.status === 200 && health.payload?.ok === true
   && health.payload?.ready === true && Array.isArray(health.payload?.missing) && health.payload.missing.length === 0, `${health.response.status} ${health.text.slice(0, 200)}`)
@@ -78,7 +118,7 @@ check('unapproved CORS origin is denied', hostileOrigin.response.status === 200 
 const publicConfig = await request('/config/public')
 const publicKeys = Object.keys(publicConfig.payload || {}).sort().join(',')
 check('public configuration exposes only safe storefront settings', publicConfig.response.status === 200
-  && publicKeys === 'announcement,bundles,paymentProvider,policies,products,reviewPolicy,suiteContent,supportEmail,trustpilotBusinessUnitId,trustpilotBusinessUrl'
+  && publicKeys === 'announcement,bundles,infoEmail,paymentProvider,policies,products,reviewPolicy,suiteContent,supportEmail,trustpilotBusinessUnitId,trustpilotBusinessUrl'
   && publicConfig.payload?.reviewPolicy === 'neutral-all-verified-buyers'
   && typeof publicConfig.payload?.suiteContent === 'object'
   && typeof publicConfig.payload?.policies === 'object'
@@ -102,7 +142,216 @@ check('cashflow-os defaults remain the anchor offer', Boolean(cashflowPublic)
 check('public configuration leaks no privileged names', !/"BREVO|GOOGLE_SHEETS|SUPABASE_ANON|FEEDBACK_SIGNING|"activePriceId"|"lemonVariantId"|"deliveryUrl"/i.test(publicConfig.text))
 
 if (OWNER_TOKEN) {
-  const ownerHeaders = { Authorization: `Bearer ${OWNER_TOKEN}` }
+  const baseOwnerHeaders = { Authorization: `Bearer ${OWNER_TOKEN}` }
+  const enrollment = await request('/admin/totp/enrol', { method: 'POST', headers: baseOwnerHeaders, body: {} })
+  check('owner can begin pending TOTP enrollment', enrollment.response.status === 201 && typeof enrollment.payload?.secret === 'string', `${enrollment.response.status} ${enrollment.text.slice(0, 160)}`)
+  const verification = await request('/admin/totp/verify', {
+    method: 'POST',
+    headers: baseOwnerHeaders,
+    body: { code: currentTotp(enrollment.payload?.secret) },
+  })
+  ADMIN_CHALLENGE = verification.payload?.challenge || ''
+  check('TOTP verification returns a short-lived signed challenge', verification.response.status === 200 && ADMIN_CHALLENGE.length > 40, `${verification.response.status} ${verification.text.slice(0, 160)}`)
+  const ownerHeaders = { ...baseOwnerHeaders, 'X-Admin-Challenge': ADMIN_CHALLENGE }
+
+  // Blog newsletter: a public request needs explicit consent, sends a
+  // scanner-safe fragment link, and becomes marketing-eligible only after a
+  // one-time POST confirmation.
+  const newsletterNoConsent = await request('/newsletter/subscribe', {
+    method: 'POST', body: { email: 'blog-reader@suite.test', source: 'blog_index' },
+  })
+  check('Blog newsletter requires explicit consent', newsletterNoConsent.response.status === 400, `${newsletterNoConsent.response.status} ${newsletterNoConsent.text}`)
+  const newsletterRequest = await request('/newsletter/subscribe', {
+    method: 'POST', body: { email: 'blog-reader@suite.test', consent: true, source: 'blog_index', company: '' },
+  })
+  check('Blog newsletter request returns a generic confirmation response', newsletterRequest.response.status === 202
+    && newsletterRequest.payload?.accepted === true && !newsletterRequest.text.includes('blog-reader@suite.test'), `${newsletterRequest.response.status} ${newsletterRequest.text}`)
+  const newsletterProviderFailure = await request('/newsletter/subscribe', {
+    method: 'POST', body: { email: 'newsletter-provider-failure@suite.test', consent: true, source: 'home', company: '' },
+  })
+  check('newsletter provider failures cannot reveal whether an address already exists', newsletterProviderFailure.response.status === 202
+    && newsletterProviderFailure.payload?.accepted === true
+    && !newsletterProviderFailure.text.includes('newsletter-provider-failure@suite.test'), `${newsletterProviderFailure.response.status} ${newsletterProviderFailure.text}`)
+  const newsletterEmails = await fetch(`${MOCK_PROVIDER_URL}/test/emails`).then((response) => response.json())
+  const confirmationEmail = [...newsletterEmails].reverse().find((email) => email?.to?.[0]?.email === 'blog-reader@suite.test')
+  const confirmationMatch = /\/newsletter\/confirm#token=([A-Za-z0-9_-]{40,100})/.exec(String(confirmationEmail?.htmlContent || ''))
+  const newsletterToken = confirmationMatch?.[1] || ''
+  check('newsletter confirmation email contains a fragment token but no automatic action', Boolean(newsletterToken)
+    && String(confirmationEmail?.subject || '').includes('Confirm') && !String(confirmationEmail?.htmlContent || '').includes('/newsletter/confirm?token='), JSON.stringify(confirmationEmail || {}).slice(0, 240))
+  const newsletterGet = await request('/newsletter/confirm')
+  check('email scanners cannot confirm Blog subscriptions with GET', newsletterGet.response.status === 404, `${newsletterGet.response.status} ${newsletterGet.text}`)
+  const newsletterConfirm = await request('/newsletter/confirm', { method: 'POST', body: { token: newsletterToken } })
+  check('one-time confirmation activates Blog email consent', newsletterConfirm.response.status === 200 && newsletterConfirm.payload?.confirmed === true, `${newsletterConfirm.response.status} ${newsletterConfirm.text}`)
+  const newsletterReplay = await request('/newsletter/confirm', { method: 'POST', body: { token: newsletterToken } })
+  check('Blog newsletter confirmation token cannot be replayed', newsletterReplay.response.status === 410, `${newsletterReplay.response.status} ${newsletterReplay.text}`)
+  const newsletterAudience = await request('/admin/marketing/audience?search=blog-reader%40suite.test', { headers: ownerHeaders })
+  check('confirmed Blog subscriber enters the consented lead audience', newsletterAudience.response.status === 200
+    && newsletterAudience.payload?.contacts?.length === 1
+    && newsletterAudience.payload.contacts[0].status === 'subscribed'
+    && newsletterAudience.payload.contacts[0].isCustomer === false
+    && newsletterAudience.payload.contacts[0].marketingOptInSource === 'newsletter_blog_index'
+    && Boolean(newsletterAudience.payload.contacts[0].marketingOptInAt), `${newsletterAudience.response.status} ${newsletterAudience.text}`)
+
+  // Blog publishing: imported content stays private, executable HTML is
+  // discarded, media is reusable and usage-protected, publication updates all
+  // discovery surfaces, and URL changes retain a permanent public redirect.
+  const blogCategories = await request('/admin/blog/categories', { headers: ownerHeaders })
+  const financeCategory = blogCategories.payload?.categories?.find((category) => category.slug === 'finance')
+  check('Blog categories are seeded for the owner workspace', blogCategories.response.status === 200
+    && blogCategories.payload?.categories?.length >= 5 && Boolean(financeCategory?.id), `${blogCategories.response.status} ${blogCategories.text}`)
+
+  const unauthorizedBlogCreate = await request('/admin/blog/posts', {
+    method: 'POST', body: { title: 'Unauthorized Blog article' },
+  })
+  check('Blog mutations require an authenticated owner', unauthorizedBlogCreate.response.status === 401, `${unauthorizedBlogCreate.response.status} ${unauthorizedBlogCreate.text}`)
+
+  const importedBlog = await request('/admin/blog/import', {
+    method: 'POST', headers: ownerHeaders,
+    body: {
+      format: 'html', layout: 'editorial',
+      content: '<h1>Unsafe AI Page</h1><script>window.stolen=true</script><style>body{display:none}</style><iframe src="https://attacker.example"></iframe><form><input name="card"></form><h2>Useful section</h2><p>Safe editorial content survives this import.</p>',
+    },
+  })
+  const importedPost = importedBlog.payload?.post
+  check('AI HTML import always creates a private draft', importedBlog.response.status === 201
+    && importedPost?.status === 'draft' && !importedPost?.publishedAt, `${importedBlog.response.status} ${importedBlog.text}`)
+  check('AI HTML import strips executable and embedded webpage code', !/<\/?(?:script|style|iframe|form|input)\b/i.test(importedPost?.bodyMarkdown || '')
+    && !String(importedPost?.bodyMarkdown || '').includes('window.stolen'), importedPost?.bodyMarkdown || '')
+  const remoteImageImport = await request('/admin/blog/import', {
+    method: 'POST', headers: ownerHeaders,
+    body: { format: 'markdown', content: '# Remote image draft\n\nUseful imported text.\n\n![tracking pixel](https://tracker.example/pixel.png)' },
+  })
+  check('safe AI import omits remote image trackers without losing the private draft', remoteImageImport.response.status === 201
+    && remoteImageImport.payload?.post?.status === 'draft' && !remoteImageImport.payload?.post?.bodyMarkdown?.includes('https://tracker.example')
+    && remoteImageImport.payload?.warnings?.some((warning) => /Remote Markdown images/i.test(warning)), remoteImageImport.text)
+
+  const importedPrivate = await request(`/blog/posts/${encodeURIComponent(importedPost?.slug || 'missing')}`)
+  check('private Blog drafts never appear on public article routes', importedPrivate.response.status === 404, `${importedPrivate.response.status} ${importedPrivate.text}`)
+
+  const mediaUpload = await request('/admin/blog/media', {
+    method: 'POST', headers: ownerHeaders,
+    body: {
+      image: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      altText: 'A single test pixel representing an editorial cover', caption: 'Regression fixture', originalName: 'journal-cover.png',
+    },
+  })
+  check('owner can add validated reusable Blog media', mediaUpload.response.status === 201
+    && mediaUpload.payload?.media?.mimeType === 'image/png' && mediaUpload.payload?.media?.width === 1 && mediaUpload.payload?.media?.height === 1,
+  `${mediaUpload.response.status} ${mediaUpload.text}`)
+
+  const completeBody = [
+    '## Build one reliable operating view',
+    '',
+    'Independent businesses make better decisions when cash, commitments, and client work can be understood in one calm operating rhythm. This article explains a practical weekly review without adding unnecessary reporting work.',
+    '',
+    '## Ask the questions that change decisions',
+    '',
+    'Start with available cash, upcoming commitments, overdue invoices, project capacity, and the next decision each signal creates. Keep the model focused on action rather than decorative complexity.',
+    '',
+    '> A useful business system reduces decision friction and makes the next responsible action visible.',
+  ].join('\n')
+  const completedBlog = await request(`/admin/blog/posts/${encodeURIComponent(importedPost?.id || '')}`, {
+    method: 'PATCH', headers: ownerHeaders,
+    body: {
+      version: importedPost?.version, title: 'A complete Blog publishing regression field note', slug: 'journal-publishing-regression',
+      excerpt: 'A complete field note used to verify secure drafting, reusable media, publication, discovery, revisions, and stable redirects.',
+      bodyMarkdown: completeBody, categoryId: financeCategory?.id, coverMediaId: mediaUpload.payload?.media?.id,
+      tags: ['Operations', 'Testing'], authorName: 'Runway Systems', layout: 'field-note', featured: true,
+    },
+  })
+  const completedPost = completedBlog.payload?.post
+  check('owner can save canonical Markdown with editorial metadata', completedBlog.response.status === 200
+    && completedPost?.category?.slug === 'finance' && completedPost?.tags?.includes('Testing') && completedPost?.cover?.altText,
+  `${completedBlog.response.status} ${completedBlog.text}`)
+
+  const externalTrackerSave = await request(`/admin/blog/posts/${encodeURIComponent(importedPost?.id || '')}`, {
+    method: 'PATCH', headers: ownerHeaders,
+    body: { version: completedPost?.version, bodyMarkdown: `${completeBody}\n\n![remote pixel](https://tracker.example/pixel.png)` },
+  })
+  check('Blog content rejects remote image trackers in favor of validated media', externalTrackerSave.response.status === 400
+    && /media library/i.test(externalTrackerSave.payload?.message || ''), `${externalTrackerSave.response.status} ${externalTrackerSave.text}`)
+
+  const staleBlogSave = await request(`/admin/blog/posts/${encodeURIComponent(importedPost?.id || '')}`, {
+    method: 'PATCH', headers: ownerHeaders,
+    body: { version: importedPost?.version, title: 'A stale article save must fail' },
+  })
+  check('Blog autosaves reject stale versions instead of overwriting edits', staleBlogSave.response.status === 409, `${staleBlogSave.response.status} ${staleBlogSave.text}`)
+
+  const publishedBlog = await request(`/admin/blog/posts/${encodeURIComponent(completedPost?.id || '')}/publish`, {
+    method: 'POST', headers: ownerHeaders, body: { version: completedPost?.version },
+  })
+  const publishedPost = publishedBlog.payload?.post
+  check('owner can publish a validated Blog draft without a deployment', publishedBlog.response.status === 200
+    && publishedPost?.status === 'published' && Boolean(publishedPost?.publishedAt), `${publishedBlog.response.status} ${publishedBlog.text}`)
+
+  const publicBlogList = await request('/blog/posts')
+  const publicBlogPost = await request('/blog/posts/journal-publishing-regression')
+  check('published Blog articles appear in the public index and stable article route', publicBlogList.response.status === 200
+    && publicBlogList.payload?.posts?.some((post) => post.slug === 'journal-publishing-regression')
+    && publicBlogPost.response.status === 200 && publicBlogPost.payload?.post?.bodyMarkdown === completeBody,
+  `${publicBlogList.response.status} ${publicBlogPost.response.status}`)
+
+  const usedMediaDelete = await request(`/admin/blog/media/${encodeURIComponent(mediaUpload.payload?.media?.id || '')}`, {
+    method: 'DELETE', headers: ownerHeaders,
+  })
+  check('Blog media cannot be deleted while an article uses it', usedMediaDelete.response.status === 409, `${usedMediaDelete.response.status} ${usedMediaDelete.text}`)
+
+  const changedSlug = await request(`/admin/blog/posts/${encodeURIComponent(publishedPost?.id || '')}/change-slug`, {
+    method: 'POST', headers: ownerHeaders, body: { version: publishedPost?.version, slug: 'journal-publishing-regression-v2' },
+  })
+  const redirectedArticle = await request('/blog/posts/journal-publishing-regression')
+  const currentArticle = await request('/blog/posts/journal-publishing-regression-v2')
+  check('published URL changes preserve an old-slug redirect', changedSlug.response.status === 200
+    && redirectedArticle.response.status === 200 && redirectedArticle.payload?.redirectTo === '/blog/journal-publishing-regression-v2'
+    && currentArticle.response.status === 200, `${changedSlug.response.status} ${redirectedArticle.text}`)
+
+  const blogRss = await request('/blog/feed.xml')
+  const blogLlms = await request('/llms.txt')
+  const blogSitemap = await request('/sitemap.xml')
+  check('RSS updates automatically from published Blog records', blogRss.response.status === 200
+    && blogRss.text.includes('/blog/journal-publishing-regression-v2') && !blogRss.text.includes('<script'), blogRss.text.slice(0, 220))
+  check('LLM discovery lists published Blog records only', blogLlms.response.status === 200
+    && blogLlms.text.includes('/blog/journal-publishing-regression-v2') && !blogLlms.text.includes('Unsafe AI Page'), blogLlms.text.slice(0, 220))
+  check('dynamic sitemap includes the current published slug, not its redirect', blogSitemap.response.status === 200
+    && blogSitemap.text.includes('/blog/journal-publishing-regression-v2') && !blogSitemap.text.includes('/blog/journal-publishing-regression</loc>'), blogSitemap.text.slice(-350))
+
+  const changedPublishedPost = changedSlug.payload?.post
+  const editedPublishedBlog = await request(`/admin/blog/posts/${encodeURIComponent(publishedPost?.id || '')}`, {
+    method: 'PATCH', headers: ownerHeaders,
+    body: { version: changedPublishedPost?.version, bodyMarkdown: `${completeBody}\n\nTemporary published edit.`, tags: ['Temporary'] },
+  })
+  const blogRevisions = await request(`/admin/blog/posts/${encodeURIComponent(publishedPost?.id || '')}/revisions`, { headers: ownerHeaders })
+  check('publication and URL changes create immutable Blog revisions', blogRevisions.response.status === 200
+    && blogRevisions.payload?.revisions?.length >= 3, `${blogRevisions.response.status} ${blogRevisions.text}`)
+  const publishedUpdateRevision = blogRevisions.payload?.revisions?.find((revision) => revision.reason === 'published-update')
+  const restoredBlog = await request(`/admin/blog/posts/${encodeURIComponent(publishedPost?.id || '')}/revisions/${encodeURIComponent(publishedUpdateRevision?.id || '')}/restore`, {
+    method: 'POST', headers: ownerHeaders, body: { version: editedPublishedBlog.payload?.post?.version },
+  })
+  check('owner can restore content and associations from an immutable revision', restoredBlog.response.status === 200
+    && restoredBlog.payload?.post?.bodyMarkdown === completeBody && restoredBlog.payload?.post?.tags?.includes('Testing'),
+  `${restoredBlog.response.status} ${restoredBlog.text}`)
+
+  const scheduledDraft = await request('/admin/blog/posts', {
+    method: 'POST', headers: ownerHeaders,
+    body: { title: 'A scheduled Blog field note for regression', slug: 'scheduled-journal-regression', excerpt: 'This complete excerpt verifies that future Blog records remain private until the server publication time.', bodyMarkdown: completeBody, categoryId: financeCategory?.id, tags: ['Scheduling'], layout: 'tutorial' },
+  })
+  const scheduledAt = new Date(Date.now() + 700).toISOString()
+  const scheduledBlog = await request(`/admin/blog/posts/${encodeURIComponent(scheduledDraft.payload?.post?.id || '')}/schedule`, {
+    method: 'POST', headers: ownerHeaders, body: { version: scheduledDraft.payload?.post?.version, scheduledAt },
+  })
+  const futurePrivate = await request('/blog/posts/scheduled-journal-regression')
+  check('future scheduled Blog articles remain private', scheduledBlog.response.status === 200
+    && scheduledBlog.payload?.post?.status === 'scheduled' && futurePrivate.response.status === 404,
+  `${scheduledBlog.response.status} ${futurePrivate.response.status}`)
+  await new Promise((resolve) => setTimeout(resolve, 850))
+  await request('/cdn-cgi/local/scheduled', { origin: null })
+  await request('/cdn-cgi/local/scheduled', { origin: null })
+  const publishedSchedule = await request(`/admin/blog/posts/${encodeURIComponent(scheduledDraft.payload?.post?.id || '')}`, { headers: ownerHeaders })
+  const publicSchedule = await request('/blog/posts/scheduled-journal-regression')
+  check('scheduled Blog publication is automatic and idempotent', publishedSchedule.payload?.post?.status === 'published'
+    && publishedSchedule.payload?.post?.version === scheduledBlog.payload?.post?.version + 1 && publicSchedule.response.status === 200,
+  `${publishedSchedule.response.status} ${publishedSchedule.text}`)
+
   // Reset persisted settings first so the run is idempotent across repeats.
   await request('/admin/settings', {
     method: 'PUT',
@@ -121,7 +370,7 @@ if (OWNER_TOKEN) {
   await request('/admin/products/cashflow-os', {
     method: 'PATCH',
     headers: ownerHeaders,
-    body: { name: 'Cash Flow OS', tagline: '', category: 'Finance', icon: 'spreadsheet', accent: 'lime', lemonVariantId: '', deliveryUrl: '', offerActive: true, offerLabel: 'Launch Offer', originalPrice: '$69', salePrice: '$39', active: true, featured: true, sortOrder: 0, includes: ['Live finance dashboard', 'Private Google Sheets copy', 'All future updates'] },
+    body: { name: 'Cash Flow OS', tagline: '', category: 'Finance', icon: 'spreadsheet', accent: 'lime', lemonVariantId: '', deliveryUrl: 'https://docs.google.com/spreadsheets/d/local-cashflow-template/copy', offerActive: true, offerLabel: 'Launch Offer', originalPrice: '$69', salePrice: '$39', active: true, featured: true, sortOrder: 0, includes: ['Live finance dashboard', 'Private Google Sheets copy', 'All future updates'] },
   })
   const adminSettings = await request('/admin/settings', { headers: ownerHeaders })
   check('owner settings keep Lemon Squeezy billing and public offer fields distinct', adminSettings.response.status === 200
@@ -231,7 +480,7 @@ if (OWNER_TOKEN) {
     category: 'Finance',
     icon: 'spreadsheet',
     accent: 'lime',
-    deliveryUrl: '',
+    deliveryUrl: 'https://docs.google.com/spreadsheets/d/local-cashflow-template/copy',
     offerActive: true,
     offerLabel: 'Launch Offer',
     originalPrice: '$69',
@@ -463,6 +712,18 @@ if (OWNER_TOKEN) {
   })
   check('features can be removed', featureDeleted.response.status === 200 && featureDeleted.payload?.removed === true, `${featureDeleted.response.status} ${featureDeleted.text}`)
 
+  // Webhook entitlements must correlate to a checkout created by an
+  // authenticated account. Configure authoritative prices/variants first.
+  await request('/admin/products/cashflow-os', { method: 'PATCH', headers: ownerHeaders, body: { ...cashflowBase, lemonVariantId: '99999', priceCents: 3900, currency: 'USD' } })
+  await request('/admin/products/client-crm-os', {
+    method: 'PATCH', headers: ownerHeaders,
+    body: { name: 'Client CRM OS', tagline: '', category: 'Client relationships', icon: 'users', accent: 'blue', lemonVariantId: '99997', deliveryUrl: 'https://docs.google.com/spreadsheets/d/local-crm-template/copy', offerActive: true, offerLabel: 'Launch Offer', originalPrice: '$59', salePrice: '$35', priceCents: 3500, currency: 'USD', active: true, featured: true, sortOrder: 1, includes: ['Private Google Sheets copy'] },
+  })
+  await request('/admin/products/invoice-os', {
+    method: 'PATCH', headers: ownerHeaders,
+    body: { name: 'Invoice OS', tagline: '', category: 'Invoicing', icon: 'receipt', accent: 'peach', lemonVariantId: '99996', deliveryUrl: '', offerActive: true, offerLabel: 'Launch Offer', originalPrice: '$49', salePrice: '$29', priceCents: 2900, currency: 'USD', active: true, featured: true, sortOrder: 3, includes: ['Private Google Sheets copy'] },
+  })
+
   // Multi-product checkout: one paid Lemon Squeezy order carrying several
   // product keys must grant one entitlement per product, with the order
   // total split across the keys.
@@ -470,6 +731,8 @@ if (OWNER_TOKEN) {
   const salesBefore = Number(analyticsBefore.payload?.totalSales || 0)
   const revenueBefore = Number(analyticsBefore.payload?.revenue || 0)
 
+  const suiteCheckout = await createCheckoutFixture('suite-checkout-token', ['cashflow-os', 'client-crm-os'])
+  check('multi-product checkout returns an exact correlation id', suiteCheckout.response.response.status === 201 && Boolean(suiteCheckout.checkoutId), `${suiteCheckout.response.response.status} ${suiteCheckout.response.text}`)
   const suiteOrderIdentifier = `ls-suite-${Date.now()}`
   const suiteEvent = {
     meta: { event_name: 'order_created' },
@@ -479,15 +742,16 @@ if (OWNER_TOKEN) {
       attributes: {
         identifier: suiteOrderIdentifier,
         order_number: 2001,
-        user_email: 'suite-buyer@example.com',
+        user_email: suiteCheckout.email,
         user_name: 'Suite Buyer',
         status: 'paid',
-        subtotal: 6100,
-        total: 7000,
+        subtotal: 7400,
+        total: 7400,
         currency: 'USD',
+        checkout_id: suiteCheckout.checkoutId,
         created_at: new Date().toISOString(),
-        custom: { user_id: 'regression-suite-user', product_keys: ['cashflow-os', 'client-crm-os'] },
-        first_order_item: { variant_id: 99999, price: 6100 },
+        custom: { user_id: suiteCheckout.userId, product_keys: ['cashflow-os', 'client-crm-os'] },
+        first_order_item: { variant_id: 99999, price: 7400, checkout_id: suiteCheckout.checkoutId },
       },
     },
   }
@@ -496,7 +760,7 @@ if (OWNER_TOKEN) {
 
   const analyticsAfterSuite = await request('/admin/analytics', { headers: ownerHeaders })
   check('multi-product orders grant one entitlement per product', Number(analyticsAfterSuite.payload?.totalSales || 0) === salesBefore + 2
-    && Number(analyticsAfterSuite.payload?.revenue || 0) === revenueBefore + 70, `${analyticsAfterSuite.response.status} ${analyticsAfterSuite.text.slice(0, 160)}`)
+    && Number(analyticsAfterSuite.payload?.revenue || 0) === revenueBefore + 74, `${analyticsAfterSuite.response.status} ${analyticsAfterSuite.text.slice(0, 160)}`)
 
   const suiteReplay = {
     ...suiteEvent,
@@ -529,14 +793,15 @@ if (OWNER_TOKEN) {
   }
   const legacyWebhook = await signedLemonWebhook(legacyEvent)
   const analyticsAfterLegacy = await request('/admin/analytics', { headers: ownerHeaders })
-  check('orders without product keys still grant the anchor entitlement', legacyWebhook.response.status === 200
-    && Number(analyticsAfterLegacy.payload?.totalSales || 0) === salesBefore + 3
-    && Number(analyticsAfterLegacy.payload?.revenue || 0) === revenueBefore + 109, `${legacyWebhook.response.status} ${legacyWebhook.text.slice(0, 160)}`)
+  check('orders without authenticated product metadata are rejected', legacyWebhook.response.status === 400
+    && Number(analyticsAfterLegacy.payload?.totalSales || 0) === salesBefore + 2
+    && Number(analyticsAfterLegacy.payload?.revenue || 0) === revenueBefore + 74, `${legacyWebhook.response.status} ${legacyWebhook.text.slice(0, 160)}`)
 
+  const officialCheckout = await createCheckoutFixture('official-checkout-token', ['cashflow-os', 'invoice-os'])
   const officialCustomEvent = {
     meta: {
       event_name: 'order_created',
-      custom_data: { user_id: 'regression-official-user', product_keys: 'cashflow-os,invoice-os' },
+      custom_data: { user_id: officialCheckout.userId, product_keys: 'cashflow-os,invoice-os' },
     },
     data: {
       id: String(4500 + (Date.now() % 100000)),
@@ -544,24 +809,270 @@ if (OWNER_TOKEN) {
       attributes: {
         identifier: `ls-official-custom-${Date.now()}`,
         order_number: 4501,
-        user_email: 'official-custom@example.com',
+        user_email: officialCheckout.email,
         user_name: 'Official Custom',
         status: 'paid',
-        subtotal: 6100,
+        subtotal: 6800,
         total: 6800,
         currency: 'USD',
+        checkout_id: officialCheckout.checkoutId,
         created_at: new Date().toISOString(),
-        first_order_item: { variant_id: 99999, price: 6100 },
+        first_order_item: { variant_id: 99999, price: 6800, checkout_id: officialCheckout.checkoutId },
       },
     },
   }
   const officialCustomWebhook = await signedLemonWebhook(officialCustomEvent)
   const analyticsAfterOfficial = await request('/admin/analytics', { headers: ownerHeaders })
   check('official Lemon Squeezy custom_data strings grant every listed product', officialCustomWebhook.response.status === 200
-    && Number(analyticsAfterOfficial.payload?.totalSales || 0) === salesBefore + 5, `${officialCustomWebhook.response.status} ${officialCustomWebhook.text.slice(0, 160)}`)
+    && Number(analyticsAfterOfficial.payload?.totalSales || 0) === salesBefore + 4, `${officialCustomWebhook.response.status} ${officialCustomWebhook.text.slice(0, 160)}`)
+
+  // Complimentary access: an owner can bypass checkout without creating a
+  // fake sale. The opaque invitation remains useless until the exact verified
+  // recipient signs in, and the token is consumed when access is materialized.
+  const complimentaryInput = {
+    email: 'complimentary-friend-token@suite.test',
+    productKeys: ['cashflow-os', 'client-crm-os'],
+    idempotencyKey: `complimentary-regression-${Date.now()}`,
+  }
+  const complimentaryWithoutElevation = await request('/admin/complimentary-grants', {
+    method: 'POST',
+    headers: baseOwnerHeaders,
+    body: complimentaryInput,
+  })
+  check('complimentary grants require an elevated owner challenge', complimentaryWithoutElevation.response.status === 401, `${complimentaryWithoutElevation.response.status} ${complimentaryWithoutElevation.text.slice(0, 160)}`)
+
+  const analyticsBeforeComplimentary = await request('/admin/analytics', { headers: ownerHeaders })
+  const comingSoonComplimentaryProduct = await request('/admin/products/cashflow-os', {
+    method: 'PATCH',
+    headers: ownerHeaders,
+    body: { ...cashflowBase, status: 'coming_soon', lemonVariantId: '99999', priceCents: 3900, currency: 'USD' },
+  })
+  const inactiveComplimentaryGrant = await request('/admin/complimentary-grants', {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: {
+      email: 'future-product@example.com',
+      productKeys: ['cashflow-os'],
+      idempotencyKey: 'complimentary-future-inactive-001',
+    },
+  })
+  check('complimentary grants are limited to active products', comingSoonComplimentaryProduct.response.status === 200
+    && inactiveComplimentaryGrant.response.status === 409
+    && /must be active/i.test(inactiveComplimentaryGrant.payload?.message || ''), `${comingSoonComplimentaryProduct.response.status} ${inactiveComplimentaryGrant.response.status} ${inactiveComplimentaryGrant.text.slice(0, 140)}`)
+
+  const clearedComplimentaryDelivery = await request('/admin/products/cashflow-os', {
+    method: 'PATCH',
+    headers: ownerHeaders,
+    body: { ...cashflowBase, status: 'active', lemonVariantId: '99999', priceCents: 3900, currency: 'USD', deliveryUrl: '' },
+  })
+  const missingComplimentaryDelivery = await request('/admin/complimentary-grants', {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: {
+      email: 'missing-delivery@example.com',
+      productKeys: ['cashflow-os'],
+      idempotencyKey: 'complimentary-missing-delivery-001',
+    },
+  })
+  const restoredComplimentaryDelivery = await request('/admin/products/cashflow-os', {
+    method: 'PATCH',
+    headers: ownerHeaders,
+    body: { ...cashflowBase, status: 'active', lemonVariantId: '99999', priceCents: 3900, currency: 'USD', deliveryUrl: 'https://docs.google.com/spreadsheets/d/test-cashflow/copy' },
+  })
+  check('complimentary grants reject products without delivery configuration', clearedComplimentaryDelivery.response.status === 200
+    && missingComplimentaryDelivery.response.status === 503
+    && restoredComplimentaryDelivery.response.status === 200, `${clearedComplimentaryDelivery.response.status} ${missingComplimentaryDelivery.response.status} ${restoredComplimentaryDelivery.response.status}`)
+
+  const complimentaryCreated = await request('/admin/complimentary-grants', {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: complimentaryInput,
+  })
+  check('owner can queue a multi-product-capable complimentary invitation', complimentaryCreated.response.status === 202
+    && complimentaryCreated.payload?.grant?.status === 'pending'
+    && complimentaryCreated.payload?.grant?.products?.[0]?.productKey === 'cashflow-os'
+    && !Object.hasOwn(complimentaryCreated.payload?.grant || {}, 'token')
+    && !Object.hasOwn(complimentaryCreated.payload?.grant || {}, 'tokenHash')
+    && !Object.hasOwn(complimentaryCreated.payload?.grant || {}, 'tokenCiphertext'), `${complimentaryCreated.response.status} ${complimentaryCreated.text.slice(0, 240)}`)
+
+  const complimentaryDuplicate = await request('/admin/complimentary-grants', {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: complimentaryInput,
+  })
+  check('complimentary grant creation is idempotent', complimentaryDuplicate.response.status === 200
+    && complimentaryDuplicate.payload?.duplicate === true
+    && complimentaryDuplicate.payload?.grant?.id === complimentaryCreated.payload?.grant?.id, `${complimentaryDuplicate.response.status} ${complimentaryDuplicate.text.slice(0, 160)}`)
+
+  const complimentaryPendingOverlap = await request('/admin/complimentary-grants', {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: {
+      email: complimentaryInput.email,
+      productKeys: complimentaryInput.productKeys,
+      idempotencyKey: 'complimentary-overlap-001',
+    },
+  })
+  check('duplicate pending complimentary products are rejected', complimentaryPendingOverlap.response.status === 409, `${complimentaryPendingOverlap.response.status} ${complimentaryPendingOverlap.text.slice(0, 180)}`)
+
+  await request('/cdn-cgi/local/scheduled', { origin: null })
+  const complimentaryEmails = await fetch(`${MOCK_PROVIDER_URL}/test/emails`).then((response) => response.json())
+  const complimentaryEmail = [...complimentaryEmails].reverse().find((email) => email.to?.[0]?.email === complimentaryInput.email && /complimentary/i.test(email.subject || ''))
+  const complimentaryEmailHtml = String(complimentaryEmail?.htmlContent || '')
+  const complimentaryToken = complimentaryEmailHtml.match(/\/claim#token=([A-Za-z0-9_-]+)/)?.[1] || ''
+  check('complimentary email contains an opaque claim link but no product delivery URL', complimentaryToken.length >= 40
+    && !/docs\.google\.com\/spreadsheets/i.test(complimentaryEmailHtml)
+    && !complimentaryEmailHtml.includes(`email=${encodeURIComponent(complimentaryInput.email)}`), complimentaryEmailHtml.slice(-400))
+
+  const scannerGet = await request('/complimentary/claim', { origin: null })
+  check('email scanners cannot consume complimentary claims with GET', scannerGet.response.status === 404, `${scannerGet.response.status} ${scannerGet.text.slice(0, 120)}`)
+
+  const complimentaryResent = await request(`/admin/complimentary-grants/${encodeURIComponent(complimentaryCreated.payload?.grant?.id || '')}/resend`, {
+    method: 'POST',
+    headers: ownerHeaders,
+  })
+  await request('/cdn-cgi/local/scheduled', { origin: null })
+  const emailsAfterResend = await fetch(`${MOCK_PROVIDER_URL}/test/emails`).then((response) => response.json())
+  const resentComplimentaryEmail = [...emailsAfterResend].reverse().find((email) => email.to?.[0]?.email === complimentaryInput.email && /complimentary/i.test(email.subject || ''))
+  const resentComplimentaryToken = String(resentComplimentaryEmail?.htmlContent || '').match(/\/claim#token=([A-Za-z0-9_-]+)/)?.[1] || ''
+  check('resend rotates the complimentary claim token', complimentaryResent.response.status === 202
+    && resentComplimentaryToken.length >= 40
+    && resentComplimentaryToken !== complimentaryToken, `${complimentaryResent.response.status} ${resentComplimentaryToken.length}`)
+
+  const rotatedTokenClaim = await request('/complimentary/claim', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer complimentary-friend-token' },
+    body: { token: complimentaryToken },
+  })
+  check('resend invalidates the previous complimentary link', rotatedTokenClaim.response.status === 410, `${rotatedTokenClaim.response.status} ${rotatedTokenClaim.text.slice(0, 160)}`)
+
+  const wrongEmailClaim = await request('/complimentary/claim', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer wrong-complimentary-token' },
+    body: { token: resentComplimentaryToken },
+  })
+  check('complimentary claims reject a different verified email', wrongEmailClaim.response.status === 403
+    && /exact email/i.test(wrongEmailClaim.payload?.message || ''), `${wrongEmailClaim.response.status} ${wrongEmailClaim.text.slice(0, 160)}`)
+
+  const complimentaryClaim = await request('/complimentary/claim', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer complimentary-friend-token' },
+    body: { token: resentComplimentaryToken },
+  })
+  check('exact-email claim activates zero-cost product access', complimentaryClaim.response.status === 200
+    && complimentaryClaim.payload?.claimed === true
+    && complimentaryClaim.payload?.products?.length === 2
+    && complimentaryClaim.payload?.products?.every((product) => product.accessSource === 'complimentary' && product.amountTotal === 0)
+    && complimentaryClaim.payload?.products?.[0]?.accessSource === 'complimentary'
+    && complimentaryClaim.payload?.products?.[0]?.amountTotal === 0, `${complimentaryClaim.response.status} ${complimentaryClaim.text.slice(0, 220)}`)
+
+  const complimentaryReplay = await request('/complimentary/claim', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer complimentary-friend-token' },
+    body: { token: resentComplimentaryToken },
+  })
+  check('complimentary claim links are one-time', complimentaryReplay.response.status === 410, `${complimentaryReplay.response.status} ${complimentaryReplay.text.slice(0, 140)}`)
+
+  const complimentaryLibrary = await request('/account/purchases', { headers: { Authorization: 'Bearer complimentary-friend-token' } })
+  const complimentaryLibraryKeys = (complimentaryLibrary.payload || [])
+    .filter((purchase) => purchase.accessSource === 'complimentary')
+    .map((purchase) => purchase.productKey)
+    .sort()
+  check('complimentary library contains exactly the owner-selected products', complimentaryLibrary.response.status === 200
+    && JSON.stringify(complimentaryLibraryKeys) === JSON.stringify([...complimentaryInput.productKeys].sort())
+    && !complimentaryLibraryKeys.includes('content-calendar'), `${complimentaryLibrary.response.status} ${complimentaryLibrary.text.slice(0, 220)}`)
+
+  const complimentaryAlreadyOwned = await request('/admin/complimentary-grants', {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: {
+      email: complimentaryInput.email,
+      productKeys: ['cashflow-os'],
+      idempotencyKey: 'complimentary-already-owned-001',
+    },
+  })
+  check('already-owned complimentary products are rejected', complimentaryAlreadyOwned.response.status === 409, `${complimentaryAlreadyOwned.response.status} ${complimentaryAlreadyOwned.text.slice(0, 180)}`)
+
+  const complimentaryFeedbackLink = await request(`/account/purchases/${encodeURIComponent(complimentaryClaim.payload?.products?.[0]?.id || '')}/feedback-link`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer complimentary-friend-token' },
+    body: {},
+  })
+  check('complimentary customers receive normal verified feedback access', complimentaryFeedbackLink.response.status === 200
+    && /^\/feedback\?token=/.test(complimentaryFeedbackLink.payload?.url || ''), `${complimentaryFeedbackLink.response.status} ${complimentaryFeedbackLink.text.slice(0, 160)}`)
+
+  const analyticsAfterComplimentary = await request('/admin/analytics', { headers: ownerHeaders })
+  check('complimentary access is excluded from paid sales and revenue', Number(analyticsAfterComplimentary.payload?.totalSales || 0) === Number(analyticsBeforeComplimentary.payload?.totalSales || 0)
+    && Number(analyticsAfterComplimentary.payload?.revenue || 0) === Number(analyticsBeforeComplimentary.payload?.revenue || 0)
+    && Number(analyticsAfterComplimentary.payload?.complimentaryCustomers || 0) === Number(analyticsBeforeComplimentary.payload?.complimentaryCustomers || 0) + 1, `${analyticsAfterComplimentary.response.status} ${analyticsAfterComplimentary.text.slice(0, 220)}`)
+
+  const complimentaryAudience = await request('/admin/marketing/audience?search=complimentary-friend-token', { headers: ownerHeaders })
+  check('complimentary recipient is marked as a non-marketed customer', complimentaryAudience.response.status === 200
+    && complimentaryAudience.payload?.contacts?.some((contact) => contact.email === complimentaryInput.email
+      && contact.isCustomer === true
+      && contact.status === 'unsubscribed'
+      && contact.complimentaryStatus === 'active'), `${complimentaryAudience.response.status} ${complimentaryAudience.text.slice(0, 220)}`)
+
+  const complimentaryReview = await request(`/admin/complimentary-grants/${encodeURIComponent(complimentaryCreated.payload?.grant?.id || '')}/review-invite`, {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: {},
+  })
+  check('complimentary review invitation is owner-controlled', complimentaryReview.response.status === 202
+    && complimentaryReview.payload?.totalQueued === 2, `${complimentaryReview.response.status} ${complimentaryReview.text.slice(0, 160)}`)
+  await request('/cdn-cgi/local/scheduled', { origin: null })
+  const emailsAfterComplimentaryReview = await fetch(`${MOCK_PROVIDER_URL}/test/emails`).then((response) => response.json())
+  const complimentaryReviewEmail = [...emailsAfterComplimentaryReview].reverse().find((email) => email.to?.[0]?.email === complimentaryInput.email && /experience|working/i.test(email.subject || ''))
+  check('manual review email discloses complimentary access and stays neutral', /complimentary access/i.test(String(complimentaryReviewEmail?.htmlContent || ''))
+    && /no particular rating is expected/i.test(String(complimentaryReviewEmail?.htmlContent || '')), String(complimentaryReviewEmail?.htmlContent || '').slice(0, 260))
+
+  const complimentaryRevoked = await request(`/admin/complimentary-grants/${encodeURIComponent(complimentaryCreated.payload?.grant?.id || '')}/revoke`, {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: {},
+  })
+  const libraryAfterComplimentaryRevoke = await request('/account/purchases', { headers: { Authorization: 'Bearer complimentary-friend-token' } })
+  check('revocation removes only complimentary access', complimentaryRevoked.response.status === 200
+    && !libraryAfterComplimentaryRevoke.payload?.some((purchase) => purchase.accessSource === 'complimentary'), `${complimentaryRevoked.response.status} ${libraryAfterComplimentaryRevoke.text.slice(0, 180)}`)
+
+  const cancellableComplimentary = await request('/admin/complimentary-grants', {
+    method: 'POST',
+    headers: ownerHeaders,
+    body: {
+      email: complimentaryInput.email,
+      productKeys: ['cashflow-os'],
+      idempotencyKey: 'complimentary-cancellation-001',
+    },
+  })
+  await request('/cdn-cgi/local/scheduled', { origin: null })
+  const emailsBeforeCancellation = await fetch(`${MOCK_PROVIDER_URL}/test/emails`).then((response) => response.json())
+  const cancellationToken = String([...emailsBeforeCancellation].reverse().find((email) => email.to?.[0]?.email === complimentaryInput.email && /complimentary/i.test(email.subject || ''))?.htmlContent || '').match(/\/claim#token=([A-Za-z0-9_-]+)/)?.[1] || ''
+  const complimentaryCancelled = await request(`/admin/complimentary-grants/${encodeURIComponent(cancellableComplimentary.payload?.grant?.id || '')}/cancel`, {
+    method: 'POST',
+    headers: ownerHeaders,
+  })
+  const cancelledClaim = await request('/complimentary/claim', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer complimentary-friend-token' },
+    body: { token: cancellationToken },
+  })
+  check('cancellation immediately invalidates an unclaimed invitation', cancellableComplimentary.response.status === 202
+    && cancellationToken.length >= 40
+    && complimentaryCancelled.response.status === 200
+    && cancelledClaim.response.status === 410, `${cancellableComplimentary.response.status} ${complimentaryCancelled.response.status} ${cancelledClaim.response.status}`)
+
+  const complimentaryAccountDeleted = await request('/account', {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer complimentary-friend-token' },
+  })
+  const grantsAfterComplimentaryDeletion = await request('/admin/complimentary-grants?search=complimentary-friend-token', { headers: ownerHeaders })
+  check('account deletion anonymizes complimentary invitation provenance', complimentaryAccountDeleted.response.status === 200
+    && complimentaryAccountDeleted.payload?.identityDeleted === true
+    && grantsAfterComplimentaryDeletion.payload?.grants?.length === 0, `${complimentaryAccountDeleted.response.status} ${grantsAfterComplimentaryDeletion.text.slice(0, 180)}`)
 
   // Account deletion: the owner user buys something, then deletes their data.
   // Personal fields must be wiped while aggregate metrics survive.
+  const deleteCheckout = await createCheckoutFixture(OWNER_TOKEN, ['cashflow-os'])
   const deleteFlowEvent = {
     meta: { event_name: 'order_created' },
     data: {
@@ -570,15 +1081,16 @@ if (OWNER_TOKEN) {
       attributes: {
         identifier: `ls-delete-${Date.now()}`,
         order_number: 5001,
-        user_email: 'delete-me@example.com',
+        user_email: deleteCheckout.email,
         user_name: 'Delete Me',
         status: 'paid',
-        subtotal: 3400,
+        subtotal: 3900,
         total: 3900,
         currency: 'USD',
+        checkout_id: deleteCheckout.checkoutId,
         created_at: new Date().toISOString(),
-        custom: { user_id: 'local-owner-user-id', product_keys: ['cashflow-os'] },
-        first_order_item: { variant_id: 99999, price: 3400 },
+        custom: { user_id: deleteCheckout.userId, product_keys: ['cashflow-os'] },
+        first_order_item: { variant_id: 99999, price: 3900, checkout_id: deleteCheckout.checkoutId },
       },
     },
   }
@@ -591,7 +1103,10 @@ if (OWNER_TOKEN) {
 
   const accountDeleted = await request('/account', { method: 'DELETE', headers: ownerHeaders })
   check('authenticated account deletion is accepted', accountDeleted.response.status === 200
-    && accountDeleted.payload?.deleted === true, `${accountDeleted.response.status} ${accountDeleted.text}`)
+    && accountDeleted.payload?.deleted === true
+    && accountDeleted.payload?.identityDeleted === true, `${accountDeleted.response.status} ${accountDeleted.text}`)
+  const deletedAuthUsers = await fetch(`${MOCK_PROVIDER_URL}/test/deleted-users`).then((response) => response.json())
+  check('account deletion removes the Supabase authentication identity', deletedAuthUsers.includes(deleteCheckout.userId), JSON.stringify(deletedAuthUsers))
 
   const purchasesAfterDelete = await request('/account/purchases', { headers: ownerHeaders })
   const analyticsAfterDelete = await request('/admin/analytics', { headers: ownerHeaders })
@@ -632,6 +1147,12 @@ if (OWNER_TOKEN) {
   check('the payment provider is always Lemon Squeezy in the public config', lsPublic.response.status === 200
     && lsPublic.payload?.paymentProvider === 'lemonsqueezy', `${lsPublic.response.status} ${lsPublic.text.slice(0, 140)}`)
 
+  await request('/admin/products/cashflow-os', { method: 'PATCH', headers: ownerHeaders, body: { ...cashflowBase, lemonVariantId: '' } })
+  await request('/admin/products/client-crm-os', {
+    method: 'PATCH', headers: ownerHeaders,
+    body: { name: 'Client CRM OS', tagline: '', category: 'Client relationships', icon: 'users', accent: 'blue', lemonVariantId: '', deliveryUrl: '', offerActive: true, offerLabel: 'Launch Offer', originalPrice: '$59', salePrice: '$35', priceCents: 3500, currency: 'USD', active: true, featured: true, sortOrder: 1, includes: ['Private Google Sheets copy'] },
+  })
+
   const lsVariantGuard = await request('/checkout/session', {
     method: 'POST',
     headers: ownerHeaders,
@@ -658,8 +1179,9 @@ if (OWNER_TOKEN) {
     headers: ownerHeaders,
     body: { productKeys: ['cashflow-os'], consent: true },
   })
-  check('Lemon Squeezy checkout degrades gracefully when unreachable', lsNetworkGuard.response.status >= 400
-    && /Lemon Squeezy/i.test(lsNetworkGuard.payload?.message || ''), `${lsNetworkGuard.response.status} ${lsNetworkGuard.text.slice(0, 160)}`)
+  check('Lemon Squeezy checkout returns a provider URL and exact session id', lsNetworkGuard.response.status === 201
+    && /^https:\/\/.*\.lemonsqueezy\.com\//.test(lsNetworkGuard.payload?.url || '')
+    && /^local-checkout-/.test(lsNetworkGuard.payload?.sessionId || ''), `${lsNetworkGuard.response.status} ${lsNetworkGuard.text.slice(0, 160)}`)
 
   await request('/admin/products/client-crm-os', {
     method: 'PATCH',
@@ -668,12 +1190,11 @@ if (OWNER_TOKEN) {
   })
   const lsBundleNetwork = await request('/checkout/session', {
     method: 'POST',
-    headers: ownerHeaders,
+    headers: { Authorization: 'Bearer bundle-network-token' },
     body: { productKeys: ['cashflow-os', 'client-crm-os'], consent: true },
   })
-  check('multi-product carts bundle into one checkout that reaches Lemon Squeezy', lsBundleNetwork.response.status >= 400
-    && /Lemon Squeezy/i.test(lsBundleNetwork.payload?.message || '')
-    && !/one product at a time/i.test(lsBundleNetwork.payload?.message || ''), `${lsBundleNetwork.response.status} ${lsBundleNetwork.text.slice(0, 160)}`)
+  check('multi-product carts create one correlated Lemon Squeezy checkout', lsBundleNetwork.response.status === 201
+    && /^local-checkout-/.test(lsBundleNetwork.payload?.sessionId || ''), `${lsBundleNetwork.response.status} ${lsBundleNetwork.text.slice(0, 160)}`)
 
   await request('/admin/products/client-crm-os', {
     method: 'PATCH',
@@ -691,15 +1212,16 @@ if (OWNER_TOKEN) {
       attributes: {
         identifier: lsOrderIdentifier,
         order_number: 1001,
-        user_email: 'ls-buyer@example.com',
+        user_email: 'owner@your-domain.com',
         user_name: 'LS Buyer',
         status: 'paid',
-        subtotal: 3400,
+        subtotal: 3900,
         total: 3900,
         currency: 'USD',
+        checkout_id: lsNetworkGuard.payload?.sessionId,
         created_at: new Date().toISOString(),
         custom: { user_id: 'local-owner-user-id', product_keys: ['cashflow-os'] },
-        first_order_item: { variant_id: 99999, price: 3400 },
+        first_order_item: { variant_id: 99999, price: 3900, checkout_id: lsNetworkGuard.payload?.sessionId },
       },
     },
   }
@@ -876,7 +1398,7 @@ check('replayed Lemon Squeezy events are idempotent', replayedOtherWebhook.respo
 // computed server-side from D1, a cart that does not match the bundle cannot
 // claim the discount, and no operational field leaks into the public config.
 if (OWNER_TOKEN) {
-  const ownerHeaders = { Authorization: `Bearer ${OWNER_TOKEN}` }
+  const ownerHeaders = { Authorization: `Bearer ${OWNER_TOKEN}`, 'X-Admin-Challenge': ADMIN_CHALLENGE }
   const bundleKey = `regression-bundle-${Date.now()}`
 
   const created = await request('/admin/bundles', {
@@ -959,7 +1481,7 @@ if (OWNER_TOKEN) {
 // Duplicating a product copies its written content but must never inherit
 // commercial wiring or media, which are per-product.
 if (OWNER_TOKEN) {
-  const ownerHeaders = { Authorization: `Bearer ${OWNER_TOKEN}` }
+  const ownerHeaders = { Authorization: `Bearer ${OWNER_TOKEN}`, 'X-Admin-Challenge': ADMIN_CHALLENGE }
   const dupKey = `dup-target-${Date.now()}`
 
   const dup = await request('/admin/products', {
@@ -1004,6 +1526,117 @@ if (OWNER_TOKEN) {
 
   const deliveryIssues = await request('/admin/delivery-issues', { headers: ownerHeaders })
   check('owner can list delivery issues', deliveryIssues.response.status === 200 && Array.isArray(deliveryIssues.payload?.issues), deliveryIssues.text.slice(0, 200))
+
+  // Waitlist identities and poll writes are bound to verified bearer/action
+  // tokens. Client-supplied user IDs are ignored.
+  const waitlistProduct = await request('/admin/products/project-os', {
+    method: 'PATCH',
+    headers: ownerHeaders,
+    body: {
+      name: 'Project OS', tagline: 'Coming soon', category: 'Projects', icon: 'gauge', accent: 'violet',
+      lemonVariantId: '', deliveryUrl: '', originalPrice: '$79', salePrice: '$49', priceCents: 4900, currency: 'USD',
+      offerLabel: 'Launch Offer', offerActive: true, status: 'coming_soon', active: true, featured: true, sortOrder: 2,
+      includes: ['Private Google Sheets copy'],
+      waitlistConfig: { welcomeEmailEnabled: false, pollEnabled: true, pollQuestion: 'Most useful view?', pollOptions: ['Timeline', 'Budget'] },
+    },
+  })
+  check('owner can configure a token-protected waitlist poll', waitlistProduct.response.status === 200, `${waitlistProduct.response.status} ${waitlistProduct.text.slice(0, 160)}`)
+
+  const waitlistJoin = await request('/waitlist/subscribe', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer waitlist-user-token' },
+    body: { productKey: 'project-os', email: 'waitlist-user-token@suite.test', userId: 'attacker-chosen-id', marketingOptIn: true, source: 'regression' },
+  })
+  const pollToken = waitlistJoin.payload?.poll?.token || ''
+  check('waitlist join returns an opaque poll action token', waitlistJoin.response.status === 200 && pollToken.length > 20, `${waitlistJoin.response.status} ${waitlistJoin.text}`)
+
+  const forgedVote = await request('/waitlist/poll-vote', { method: 'POST', body: { productKey: 'project-os', token: 'forged-token-value', vote: 'Timeline' } })
+  check('waitlist poll rejects forged action tokens', forgedVote.response.status === 401, `${forgedVote.response.status} ${forgedVote.text}`)
+  const validVote = await request('/waitlist/poll-vote', { method: 'POST', body: { productKey: 'project-os', token: pollToken, vote: 'Timeline' } })
+  check('waitlist poll accepts its one-time action token', validVote.response.status === 200, `${validVote.response.status} ${validVote.text}`)
+  const replayedVote = await request('/waitlist/poll-vote', { method: 'POST', body: { productKey: 'project-os', token: pollToken, vote: 'Budget' } })
+  check('waitlist poll token cannot be replayed', replayedVote.response.status === 401, `${replayedVote.response.status} ${replayedVote.text}`)
+
+  const adminWaitlist = await request('/admin/products/project-os/waitlist', { headers: ownerHeaders })
+  const waitlistRow = adminWaitlist.payload?.subscribers?.find((row) => row.email === 'waitlist-user-token@suite.test')
+  check('waitlist ignores client-supplied identity and stores verified identity', waitlistRow?.userId === 'local-waitlist-user-token' && waitlistRow?.pollResponse === 'Timeline', JSON.stringify(waitlistRow || null))
+
+  const launchQueued = await request('/admin/products/project-os/waitlist/broadcast', {
+    method: 'POST', headers: ownerHeaders,
+    body: { subject: 'Project OS is live', message: 'Your requested launch notice.', idempotencyKey: 'waitlist-launch-regression-001' },
+  })
+  const launchDuplicate = await request('/admin/products/project-os/waitlist/broadcast', {
+    method: 'POST', headers: ownerHeaders,
+    body: { subject: 'Project OS is live', message: 'Your requested launch notice.', idempotencyKey: 'waitlist-launch-regression-001' },
+  })
+  check('waitlist launch broadcast is queued asynchronously', launchQueued.response.status === 202 && launchQueued.payload?.totalQueued === 1, `${launchQueued.response.status} ${launchQueued.text}`)
+  check('waitlist launch idempotency prevents duplicate delivery jobs', launchDuplicate.response.status === 202 && launchDuplicate.payload?.duplicate === true, `${launchDuplicate.response.status} ${launchDuplicate.text}`)
+
+  // Manual audience additions require an explicit consent attestation. CSV
+  // values and queued campaigns are tested through the real Worker routes.
+  const noConsentContact = await request('/admin/marketing/contacts', {
+    method: 'POST', headers: ownerHeaders,
+    body: { email: 'no-consent@suite.test', name: 'No Consent', source: 'manual' },
+  })
+  check('admin cannot silently subscribe a contact without consent', noConsentContact.response.status === 400, `${noConsentContact.response.status} ${noConsentContact.text}`)
+
+  const marketingContact = await request('/admin/marketing/contacts', {
+    method: 'POST', headers: ownerHeaders,
+    body: { email: 'marketing-recipient@suite.test', name: '=HYPERLINK("https://bad.example")', source: 'manual', consentConfirmed: true },
+  })
+  check('admin can record a consent-attested marketing contact', marketingContact.response.status === 201, `${marketingContact.response.status} ${marketingContact.text}`)
+
+  const audienceCsv = await request('/admin/marketing/audience/export?segment=all', { headers: ownerHeaders })
+  check('audience CSV neutralizes spreadsheet formulas', audienceCsv.response.status === 200 && audienceCsv.text.includes("'=HYPERLINK"), audienceCsv.text.slice(0, 200))
+
+  const campaignInput = {
+    title: 'Regression campaign', subject: 'Hello {{first_name}}', eyebrow: 'RUNWAY SYSTEMS TEST',
+    message: 'This is a durable queue test.', targetSegment: 'all', targetProductKey: '', discountCode: '',
+    ctaLabel: 'Open storefront', ctaUrl: 'https://runwaysystems.cloud', idempotencyKey: 'campaign-regression-001',
+  }
+  const campaignQueued = await request('/admin/marketing/campaigns/broadcast', { method: 'POST', headers: ownerHeaders, body: campaignInput })
+  const campaignDuplicate = await request('/admin/marketing/campaigns/broadcast', { method: 'POST', headers: ownerHeaders, body: campaignInput })
+  check('marketing campaign returns 202 with durable queued deliveries', campaignQueued.response.status === 202 && campaignQueued.payload?.totalQueued >= 1, `${campaignQueued.response.status} ${campaignQueued.text}`)
+  check('campaign idempotency key returns the existing campaign', campaignDuplicate.response.status === 202 && campaignDuplicate.payload?.duplicate === true && campaignDuplicate.payload?.campaignId === campaignQueued.payload?.campaignId, `${campaignDuplicate.response.status} ${campaignDuplicate.text}`)
+
+  await request('/cdn-cgi/local/scheduled', { origin: null })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  const campaignsAfterSend = await request('/admin/marketing/campaigns', { headers: ownerHeaders })
+  const queuedCampaign = campaignsAfterSend.payload?.find((row) => row.id === campaignQueued.payload?.campaignId)
+  check('campaign queue tracks completion and send counts', queuedCampaign?.status === 'completed' && queuedCampaign?.sentCount === queuedCampaign?.recipientCount, JSON.stringify(queuedCampaign || null))
+
+  const mockEmails = await fetch('http://127.0.0.1:9876/test/emails').then((response) => response.json())
+  const marketingEmail = [...mockEmails].reverse().find((email) => email.to?.[0]?.email === 'marketing-recipient@suite.test')
+  const unsubscribeMatch = String(marketingEmail?.htmlContent || '').match(/\/unsubscribe\?token=([^"&<]+)/)
+  const unsubscribeToken = unsubscribeMatch ? decodeURIComponent(unsubscribeMatch[1]) : ''
+  check('marketing delivery uses an opaque token-only unsubscribe link', Boolean(unsubscribeToken) && !String(marketingEmail?.htmlContent || '').includes('email=marketing-recipient'), String(marketingEmail?.htmlContent || '').slice(-240))
+
+  const unsubscribeConfirm = await request(`/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`)
+  const beforeMutation = await request('/admin/marketing/audience?search=marketing-recipient', { headers: ownerHeaders })
+  check('unsubscribe GET confirms without mutating consent', unsubscribeConfirm.response.status === 200
+    && beforeMutation.payload?.contacts?.some((contact) => contact.email === 'marketing-recipient@suite.test' && contact.status === 'subscribed'), `${unsubscribeConfirm.response.status} ${beforeMutation.text}`)
+
+  const unsubscribeMutation = await request(`/marketing/unsubscribe`, { method: 'POST', body: { token: unsubscribeToken } })
+  const unsubscribeReplay = await request(`/marketing/unsubscribe`, { method: 'POST', body: { token: unsubscribeToken } })
+  const afterMutation = await request('/admin/marketing/audience?search=marketing-recipient', { headers: ownerHeaders })
+  check('unsubscribe POST creates durable suppression', unsubscribeMutation.response.status === 200
+    && afterMutation.payload?.contacts?.some((contact) => contact.email === 'marketing-recipient@suite.test' && contact.status === 'unsubscribed'), `${unsubscribeMutation.response.status} ${afterMutation.text}`)
+  check('opaque unsubscribe token is single use', unsubscribeReplay.response.status === 400, `${unsubscribeReplay.response.status} ${unsubscribeReplay.text}`)
+
+  const suppressedNewsletterRequest = await request('/newsletter/subscribe', {
+    method: 'POST', body: { email: 'marketing-recipient@suite.test', consent: true, source: 'product', company: '' },
+  })
+  const beforeReconfirmation = await request('/admin/marketing/audience?search=marketing-recipient', { headers: ownerHeaders })
+  check('an unconfirmed newsletter request never clears prior suppression', suppressedNewsletterRequest.response.status === 202
+    && beforeReconfirmation.payload?.contacts?.some((contact) => contact.email === 'marketing-recipient@suite.test' && contact.status === 'unsubscribed'), `${suppressedNewsletterRequest.response.status} ${beforeReconfirmation.text}`)
+  const reconfirmationEmails = await fetch(`${MOCK_PROVIDER_URL}/test/emails`).then((response) => response.json())
+  const reconfirmationEmail = [...reconfirmationEmails].reverse().find((email) => email?.to?.[0]?.email === 'marketing-recipient@suite.test' && /confirm/i.test(email?.subject || ''))
+  const reconfirmationToken = String(reconfirmationEmail?.htmlContent || '').match(/\/newsletter\/confirm#token=([A-Za-z0-9_-]{40,100})/)?.[1] || ''
+  const newsletterReconfirmed = await request('/newsletter/confirm', { method: 'POST', body: { token: reconfirmationToken } })
+  const afterReconfirmation = await request('/admin/marketing/audience?search=marketing-recipient', { headers: ownerHeaders })
+  check('a fresh confirmed opt-in clears prior suppression', newsletterReconfirmed.response.status === 200
+    && afterReconfirmation.payload?.contacts?.some((contact) => contact.email === 'marketing-recipient@suite.test'
+      && contact.status === 'subscribed' && contact.marketingOptInSource === 'newsletter_product'), `${newsletterReconfirmed.response.status} ${afterReconfirmation.text}`)
 }
 
 const failures = results.filter((result) => !result.condition)

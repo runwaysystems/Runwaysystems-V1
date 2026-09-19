@@ -79,11 +79,10 @@ CREATE INDEX IF NOT EXISTS admin_audit_log_created_idx ON admin_audit_log (creat
 CREATE INDEX IF NOT EXISTS admin_audit_log_subject_idx ON admin_audit_log (subject_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS admin_audit_log_entity_idx ON admin_audit_log (entity_type, entity_id, created_at DESC);
 
--- TOTP enrolment state. One row per owner. The secret is stored base32
--- and is itself protected by the fact that the row is only readable by
--- the owner via /admin/*; an attacker who has D1 read access has already
--- won and TOTP adds nothing. We still SHA-256 the recovery codes so a
--- leak of D1 alone doesn't grant account access.
+-- TOTP enrolment state. One row per owner. The Worker encrypts the base32
+-- secret with TOTP_ENCRYPTION_KEY before it enters this column and stores only
+-- SHA-256 hashes of single-use recovery codes, so a D1-only disclosure does
+-- not reveal either second factor.
 CREATE TABLE IF NOT EXISTS admin_totp (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   secret TEXT NOT NULL,

@@ -127,10 +127,41 @@ try {
     active: true,
   })
   const restored = await platformApi.getPublicConfig()
+  const restoredEntry = (restored.products || []).find((product) => product.key === hiddenKey)
   check(
     'making the product visible again puts it back on the storefront',
-    (restored.products || []).some((product) => product.key === hiddenKey),
+    Boolean(restoredEntry),
   )
+  check(
+    'an active preview product remains checkout-ready without a real provider variant',
+    restoredEntry?.status === 'active' && restoredEntry?.checkoutReady === true,
+    JSON.stringify(restoredEntry || null),
+  )
+
+  await platformApi.updateAdminProduct(hiddenKey, {
+    name: 'Cash Flow OS',
+    icon: 'spreadsheet',
+    accent: 'lime',
+    active: true,
+    status: 'coming_soon',
+  })
+  const comingSoon = await platformApi.getPublicConfig()
+  const comingSoonEntry = (comingSoon.products || []).find((product) => product.key === hiddenKey)
+  check(
+    'a Coming Soon preview product disables checkout so the notification form takes over',
+    comingSoonEntry?.status === 'coming_soon' && comingSoonEntry?.checkoutReady === false,
+    JSON.stringify(comingSoonEntry || null),
+  )
+
+  // Restore the fixture so later preview checks and manual sessions retain
+  // the normal active-product state.
+  await platformApi.updateAdminProduct(hiddenKey, {
+    name: 'Cash Flow OS',
+    icon: 'spreadsheet',
+    accent: 'lime',
+    active: true,
+    status: 'active',
+  })
 
   // ------------------------------------------------------- call-site guards
   // These keep the pages wired to the shared helper, so a future edit cannot

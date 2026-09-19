@@ -1,0 +1,15 @@
+# Copy to worker/.dev.vars for local Wrangler development and regression tests.
+# This file contains names and safe placeholders only. Never commit .dev.vars.
+# Optional local override: APP_ORIGIN="https://regression-store.test"
+# Optional local auth mock: SUPABASE_URL="http://127.0.0.1:9876"
+SUPABASE_ANON_KEY="replace-with-local-or-project-anon-key"
+SUPABASE_SERVICE_ROLE_KEY="replace-with-service-role-key"
+LEMONSQUEEZY_API_KEY="replace-with-api-key"
+# Local regression only: LEMONSQUEEZY_API_URL="http://127.0.0.1:9876/v1"
+LEMONSQUEEZY_STORE_ID="12345"
+LEMONSQUEEZY_WEBHOOK_SECRET="replace-with-a-long-random-webhook-secret"
+BREVO_API_KEY="replace-with-brevo-api-key"
+# Local regression only: BREVO_API_URL="http://127.0.0.1:9876/v3/smtp/email"
+RATE_LIMIT_SALT="replace-with-at-least-32-random-characters"
+FEEDBACK_SIGNING_SECRET="replace-with-at-least-32-random-characters"
+TOTP_ENCRYPTION_KEY="replace-with-at-least-32-random-characters"
