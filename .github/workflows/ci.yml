@@ -18,25 +18,78 @@ jobs:
     defaults:
       run:
         working-directory: cashflow-os
-    env:
-      VITE_API_BASE_URL: https://platform.test.invalid
-      VITE_SUPABASE_URL: https://project.test.invalid
-      VITE_SUPABASE_ANON_KEY: test-public-anon-key
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: cashflow-os/package-lock.json
+
       - run: npm ci
       - run: npm audit --audit-level=high
       - run: npm run check:worker
       - run: npx --no-install playwright install --with-deps chromium
-      - run: npm test
+
+      - name: Build production bundle
+        env:
+          VITE_API_BASE_URL: https://platform.test.invalid
+          VITE_SUPABASE_URL: https://project.test.invalid
+          VITE_SUPABASE_ANON_KEY: test-public-anon-key
+        run: npm run build
+
+      - name: Run static and preview-adapter regressions
+        env:
+          VITE_API_BASE_URL: ''
+          VITE_SUPABASE_URL: ''
+          VITE_SUPABASE_ANON_KEY: ''
+        run: |
+          npm run test:complimentary
+          npm run test:blog
+          npm run test:visibility
+          npm run test:csp
+          npm run test:checkout-modal
+          npm run test:marketing
+          npm run test:seo
+
+      - name: Run browser regression
+        env:
+          VITE_API_BASE_URL: ''
+          VITE_SUPABASE_URL: ''
+          VITE_SUPABASE_ANON_KEY: ''
+          BASE_URL: http://127.0.0.1:4173
+        run: |
+          npm run dev -- --host 127.0.0.1 --port 4173 --strictPort > /tmp/runway-vite.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          ready=0
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:4173/ > /dev/null; then
+              ready=1
+              break
+            fi
+
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat /tmp/runway-vite.log
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          if [ "$ready" != "1" ]; then
+            cat /tmp/runway-vite.log
+            exit 1
+          fi
+
+          npm run test:regression
+
       - name: Configure safe local Worker fixtures
         run: |
-          cat > worker/.dev.vars <<'EOF'
+          cat > worker/.dev.vars <<'EOFVARS'
           APP_ORIGIN="https://regression-store.test"
           SUPABASE_URL="http://127.0.0.1:9876"
           SUPABASE_ANON_KEY="ci-local-anon-key"
@@ -50,6 +103,6 @@ jobs:
           RATE_LIMIT_SALT="ci-local-rate-limit-salt-at-least-32-characters"
           FEEDBACK_SIGNING_SECRET="ci-local-feedback-secret-at-least-32-characters"
           TOTP_ENCRYPTION_KEY="ci-local-totp-key-at-least-32-characters"
-          EOF
+          EOFVARS
+
       - run: ./scripts/test-worker-local.sh
-      - run: npm run build
